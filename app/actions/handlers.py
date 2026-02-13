@@ -48,7 +48,7 @@ def _format_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-@crontab_schedule("0 */4 * * *")  # Every 4 hours
+@crontab_schedule("*/2 * * * *")  # Every 2 minutes
 @activity_logger()
 async def action_pull_telemetry(integration, action_config: PullTelemetryConfiguration):
     """
