@@ -30,7 +30,7 @@ The API does **not** expose a per-device human-friendly name or label. Identifie
 
 For a display name in UIs, use **`deviceRef`** (or fall back to `deviceUid`) unless you maintain your own device→name mapping.
 
-**This integration:** The pull action calls `/retrieve-device-list` before mapping telemetry to observations and builds a `deviceUid` → `customerName` map. Each observation's **source** is always **deviceRef** (messages without deviceRef are skipped). **source_name** is set to `"deviceUid (customerName)"` (e.g. `"67899 (WILDLIFE COMPUTER)"`) when the device is in the list and has a non-empty `customerName`; otherwise **source_name** equals **source** (deviceRef).
+**This integration:** The pull action calls `/retrieve-device-list` before mapping telemetry to observations and builds a `deviceUid` → `customerName` map. Each observation's **source** is always **deviceRef** (messages without deviceRef are skipped). **source_name** is set to `"source (customerName)"` (e.g. `"7896 (WILDLIFE COMPUTER)"`) when the device is in the list and has a non-empty `customerName`; otherwise **source_name** equals **source**.
 
 ## Message Types
 

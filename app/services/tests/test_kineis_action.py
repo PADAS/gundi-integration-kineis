@@ -214,7 +214,7 @@ async def test_action_pull_telemetry_uses_realtime_when_checkpoint_stored(
 async def test_action_pull_telemetry_source_name_from_device_list(
     mocker, integration_with_id, pull_telemetry_config, authenticate_kineis_config
 ):
-    """When fetch_device_list returns devices with customerName, observations get source_name 'deviceUid (customerName)'."""
+    """When fetch_device_list returns customerName, observations get source_name 'source (customerName)'."""
     sample_messages = [
         {
             "deviceUid": 67899,
@@ -246,4 +246,5 @@ async def test_action_pull_telemetry_source_name_from_device_list(
     mock_fetch_device_list.assert_called_once()
     observations = mock_send.call_args[1]["observations"]
     assert len(observations) == 1
-    assert observations[0]["source_name"] == "67899 (WILDLIFE COMPUTER)"
+    assert observations[0]["source"] == "7896"
+    assert observations[0]["source_name"] == "7896 (WILDLIFE COMPUTER)"

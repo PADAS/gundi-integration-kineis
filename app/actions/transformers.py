@@ -37,9 +37,10 @@ def telemetry_to_observation(
 
     Prefers GPS location (gpsLocLat/Lon) and GPS fix time (gpsLocDatetime) when present;
     falls back to Doppler location and message timestamps. Returns None if location
-    or required fields are missing.     When device_uid_to_customer_name is provided and
-    the message's deviceUid is in the map, source_name is set to "deviceUid (customerName)".
-    The observation source is always deviceRef (required); messages without deviceRef are skipped.
+    or required fields are missing. source is always deviceRef. source_name is
+    "source (customerName)" when the device list provides a customerName for the
+    message's deviceUid; otherwise source_name equals source.
+    Messages without deviceRef are skipped.
     """
     # Source: use deviceRef only (per Gundi requirement)
     device_ref = message.get("deviceRef")
@@ -97,7 +98,7 @@ def telemetry_to_observation(
     # Additional: include all record properties with original names (feedback: full record in additional)
     additional: Dict[str, Any] = dict(message)
 
-    # source_name: "deviceUid (customerName)" when device list provides customerName; else source
+    # source_name: "source (customerName)" when device list provides customerName; else source
     device_uid = message.get("deviceUid")
     if (
         device_uid_to_customer_name
@@ -105,7 +106,7 @@ def telemetry_to_observation(
         and device_uid in device_uid_to_customer_name
         and device_uid_to_customer_name[device_uid]
     ):
-        source_name = f"{device_uid} ({device_uid_to_customer_name[device_uid]})"
+        source_name = f"{source} ({device_uid_to_customer_name[device_uid]})"
     else:
         source_name = source
 
@@ -126,7 +127,7 @@ def telemetry_batch_to_observations(
 ) -> List[Dict[str, Any]]:
     """
     Map a list of telemetry messages to Gundi observations. Skips invalid messages.
-    When device_uid_to_customer_name is provided, source_name uses "deviceUid (customerName)" when available.
+    When device_uid_to_customer_name is provided, source_name is "source (customerName)" when available.
     """
     observations = []
     for msg in messages:

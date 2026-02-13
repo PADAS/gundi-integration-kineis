@@ -152,8 +152,8 @@ def test_telemetry_to_observation_sample_response_gps_fix():
     assert obs["additional"].get("msgType") == "operation-mo-pdrgroup"
 
 
-def test_telemetry_to_observation_source_name_from_device_list():
-    """When device_uid_to_customer_name is provided and deviceUid is in map, source_name is 'deviceUid (customerName)'."""
+def test_telemetry_to_observation_source_name_with_customer_name():
+    """When device_uid_to_customer_name is provided, source_name is 'source (customerName)'."""
     msg = {
         "deviceUid": 67899,
         "deviceRef": "7896",
@@ -165,10 +165,10 @@ def test_telemetry_to_observation_source_name_from_device_list():
     obs = telemetry_to_observation(msg, device_uid_to_customer_name=device_uid_to_customer_name)
     assert obs is not None
     assert obs["source"] == "7896"
-    assert obs["source_name"] == "67899 (WILDLIFE COMPUTER)"
+    assert obs["source_name"] == "7896 (WILDLIFE COMPUTER)"
 
 
-def test_telemetry_to_observation_source_name_fallback_when_not_in_map():
+def test_telemetry_to_observation_source_name_fallback_without_customer_name():
     """When deviceUid is not in device_uid_to_customer_name, source_name equals source."""
     msg = {
         "deviceUid": 99999,
@@ -177,15 +177,15 @@ def test_telemetry_to_observation_source_name_fallback_when_not_in_map():
         "gpsLocLon": 0,
         "msgTs": 1705312800000,
     }
-    device_uid_to_customer_name = {67899: "WILDLIFE COMPUTER"}
+    device_uid_to_customer_name = {67899: "WILDLIFE COMPUTER"}  # ref99 not in map
     obs = telemetry_to_observation(msg, device_uid_to_customer_name=device_uid_to_customer_name)
     assert obs is not None
     assert obs["source"] == "ref99"
     assert obs["source_name"] == "ref99"
 
 
-def test_telemetry_batch_to_observations_passes_device_map():
-    """telemetry_batch_to_observations passes device_uid_to_customer_name to each message."""
+def test_telemetry_batch_to_observations_source_name_with_customer_name():
+    """When device list is passed, observations get source_name 'source (customerName)'."""
     messages = [
         {
             "deviceUid": 67899,
@@ -201,4 +201,5 @@ def test_telemetry_batch_to_observations_passes_device_map():
         device_uid_to_customer_name=device_uid_to_customer_name,
     )
     assert len(result) == 1
-    assert result[0]["source_name"] == "67899 (WILDLIFE COMPUTER)"
+    assert result[0]["source"] == "7896"
+    assert result[0]["source_name"] == "7896 (WILDLIFE COMPUTER)"
