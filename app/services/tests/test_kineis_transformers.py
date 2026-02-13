@@ -25,8 +25,8 @@ def test_telemetry_to_observation_valid():
     assert "additional" in obs
 
 
-def test_telemetry_to_observation_device_uid():
-    """Use deviceUid when deviceRef is missing."""
+def test_telemetry_to_observation_requires_device_ref():
+    """Skip message when deviceRef is missing (source must be deviceRef for Gundi)."""
     msg = {
         "deviceUid": 62533,
         "timestamp": "2024-01-15T12:00:00Z",
@@ -34,13 +34,11 @@ def test_telemetry_to_observation_device_uid():
         "lon": 31.0,
     }
     obs = telemetry_to_observation(msg)
-    assert obs is not None
-    assert obs["source"] == "62533"
-    assert obs["location"] == {"lat": -2.0, "lon": 31.0}
+    assert obs is None
 
 
 def test_telemetry_to_observation_missing_source_returns_none():
-    """Return None when deviceRef and deviceUid are missing."""
+    """Return None when deviceRef is missing."""
     msg = {
         "recordedAt": "2024-01-15T10:00:00Z",
         "gps": {"lat": 0, "lon": 0},
@@ -67,7 +65,7 @@ def test_telemetry_to_observation_missing_timestamp_returns_none():
 
 
 def test_telemetry_to_observation_additional_fields():
-    """Extra fields appear in additional."""
+    """Additional contains full record with original property names."""
     msg = {
         "deviceRef": "D1",
         "recordedAt": "2024-01-15T10:00:00.000Z",
@@ -75,21 +73,21 @@ def test_telemetry_to_observation_additional_fields():
     }
     obs = telemetry_to_observation(msg)
     assert obs is not None
-    assert obs["additional"].get("speed") == 5.2
-    assert obs["additional"].get("course") == 90
+    assert obs["additional"] == msg
+    assert obs["additional"]["gps"]["speed"] == 5.2
+    assert obs["additional"]["gps"]["course"] == 90
 
 
 def test_telemetry_batch_to_observations_skips_invalid():
-    """Invalid messages are skipped; valid ones are returned."""
+    """Invalid messages are skipped; valid ones are returned. Source is deviceRef only."""
     messages = [
         {"deviceRef": "A", "recordedAt": "2024-01-15T10:00:00Z", "gps": {"lat": 0, "lon": 0}},
         {"deviceRef": "B"},  # missing location and timestamp
-        {"deviceUid": 1, "timestamp": "2024-01-15T11:00:00Z", "lat": 1, "lon": 1},
+        {"deviceUid": 1, "timestamp": "2024-01-15T11:00:00Z", "lat": 1, "lon": 1},  # no deviceRef -> skipped
     ]
     result = telemetry_batch_to_observations(messages)
-    assert len(result) == 2
+    assert len(result) == 1
     assert result[0]["source"] == "A"
-    assert result[1]["source"] == "1"
 
 
 def test_telemetry_to_observation_api_shape_msg_ts_gps_loc():
@@ -110,6 +108,7 @@ def test_telemetry_to_observation_api_shape_msg_ts_gps_loc():
 def test_telemetry_to_observation_api_shape_doppler_loc():
     """Map API-shaped message with dopplerLocLat/dopplerLocLon when GPS missing."""
     msg = {
+        "deviceRef": "1788",
         "deviceUid": 1788,
         "acqTs": 1705316400000,
         "dopplerLocLat": 0.0,
@@ -146,9 +145,10 @@ def test_telemetry_to_observation_sample_response_gps_fix():
     assert obs["location"] == {"lat": 20.45123, "lon": 58.77856}
     # Prefer GPS fix time for recorded_at
     assert obs["recorded_at"] == "2024-10-01T15:56:18.001Z"
-    assert obs["additional"].get("speed") == 2.78
-    assert obs["additional"].get("heading") == 67.45
-    assert obs["additional"].get("altitude") == 0
+    # Additional includes full record with original API names
+    assert obs["additional"].get("gpsLocSpeed") == 2.78
+    assert obs["additional"].get("gpsLocHeading") == 67.45
+    assert obs["additional"].get("gpsLocAlt") == 0
     assert obs["additional"].get("msgType") == "operation-mo-pdrgroup"
 
 

@@ -37,18 +37,16 @@ def telemetry_to_observation(
 
     Prefers GPS location (gpsLocLat/Lon) and GPS fix time (gpsLocDatetime) when present;
     falls back to Doppler location and message timestamps. Returns None if location
-    or required fields are missing. When device_uid_to_customer_name is provided and
+    or required fields are missing.     When device_uid_to_customer_name is provided and
     the message's deviceUid is in the map, source_name is set to "deviceUid (customerName)".
+    The observation source is always deviceRef (required); messages without deviceRef are skipped.
     """
-    # Source: deviceRef (string) or deviceUid (int) – API core fields
-    source = None
-    if message.get("deviceRef") is not None:
-        source = str(message["deviceRef"])
-    elif message.get("deviceUid") is not None:
-        source = str(message["deviceUid"])
-    if not source:
-        logger.debug("Telemetry message missing deviceRef/deviceUid, skipping")
+    # Source: use deviceRef only (per Gundi requirement)
+    device_ref = message.get("deviceRef")
+    if device_ref is None:
+        logger.debug("Telemetry message missing deviceRef, skipping")
         return None
+    source = str(device_ref)
 
     # Timestamp: for GPS fixes prefer gpsLocDatetime (fix time), then msgDatetime/acqDatetime, then msgTs/acqTs
     recorded_at = (
@@ -96,25 +94,8 @@ def telemetry_to_observation(
         logger.debug("Invalid lat/lon for %s: %s, %s", source, lat, lon)
         return None
 
-    # Additional: API uses gpsLocSpeed, gpsLocHeading, gpsLocAlt; map to common names + keep API names
-    additional: Dict[str, Any] = {}
-    for key in ("speed", "course", "altitude", "gpsFix", "fixQuality", "modemType", "modemRef"):
-        if message.get(key) is not None:
-            additional[key] = message[key]
-    if message.get("gpsLocSpeed") is not None:
-        additional["speed"] = message["gpsLocSpeed"]
-    if message.get("gpsLocHeading") is not None:
-        additional["heading"] = message["gpsLocHeading"]
-        if "course" not in additional:
-            additional["course"] = message["gpsLocHeading"]
-    if message.get("gpsLocAlt") is not None:
-        additional["altitude"] = message["gpsLocAlt"]
-    if message.get("msgType") is not None:
-        additional["msgType"] = message["msgType"]
-    if gps and isinstance(gps, dict):
-        for key in ("speed", "course", "altitude", "accuracy"):
-            if gps.get(key) is not None and key not in additional:
-                additional[key] = gps[key]
+    # Additional: include all record properties with original names (feedback: full record in additional)
+    additional: Dict[str, Any] = dict(message)
 
     # source_name: "deviceUid (customerName)" when device list provides customerName; else source
     device_uid = message.get("deviceUid")
