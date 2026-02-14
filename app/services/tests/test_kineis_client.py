@@ -213,6 +213,64 @@ async def test_retrieve_realtime_telemetry_returns_messages_and_checkpoint(mocke
 
 
 @pytest.mark.asyncio
+async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_zero(mocker):
+    """When API returns 400 INVALID_CHECKPOINT, retry once with fromCheckpoint=0 and return result."""
+    resp_400 = MagicMock()
+    resp_400.status_code = 400
+    resp_400.request = MagicMock()
+    resp_400.json.return_value = {"code": "INVALID_CHECKPOINT", "msg": "Invalid checkpoint ..."}
+    resp_400.raise_for_status = MagicMock()
+
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.json.return_value = {"contents": [], "checkpoint": 12345}
+    resp_200.raise_for_status = MagicMock()
+
+    mock_post = AsyncMock(side_effect=[resp_400, resp_200])
+    mocker.patch("app.services.kineis_client.settings.KINEIS_API_BASE_URL", "https://api.example.com")
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mocker.patch("app.services.kineis_client.httpx.AsyncClient", return_value=mock_client)
+
+    messages, new_checkpoint = await retrieve_realtime_telemetry(
+        access_token="token",
+        checkpoint=999999,
+    )
+
+    assert messages == []
+    assert new_checkpoint == 12345
+    assert mock_post.call_count == 2
+    assert mock_post.call_args_list[0][1]["json"]["fromCheckpoint"] == 999999
+    assert mock_post.call_args_list[1][1]["json"]["fromCheckpoint"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retrieve_realtime_telemetry_400_other_code_raises(mocker):
+    """400 with code other than INVALID_CHECKPOINT does not retry; raise_for_status is called."""
+    resp_400 = MagicMock()
+    resp_400.status_code = 400
+    resp_400.request = MagicMock()
+    resp_400.json.return_value = {"code": "OTHER", "msg": "Some error"}
+    resp_400.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("Bad Request", request=resp_400.request, response=resp_400))
+
+    mock_post = AsyncMock(return_value=resp_400)
+    mocker.patch("app.services.kineis_client.settings.KINEIS_API_BASE_URL", "https://api.example.com")
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mocker.patch("app.services.kineis_client.httpx.AsyncClient", return_value=mock_client)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await retrieve_realtime_telemetry(access_token="token", checkpoint=999999)
+
+    assert mock_post.call_count == 1
+    assert mock_post.call_args[1]["json"]["fromCheckpoint"] == 999999
+
+
+@pytest.mark.asyncio
 async def test_retrieve_device_list_returns_contents(mocker):
     """Device list endpoint returns contents list."""
     mock_response = MagicMock()

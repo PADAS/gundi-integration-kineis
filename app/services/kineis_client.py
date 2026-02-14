@@ -228,22 +228,28 @@ async def retrieve_realtime_telemetry(
     elif device_uids:
         body["deviceUids"] = device_uids
 
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-        response = await client.post(
-            url,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
+        response = await client.post(url, json=body, headers=headers)
         if response.status_code == 401:
             raise httpx.HTTPStatusError(
                 "Unauthorized",
                 request=response.request,
                 response=response,
             )
+        if response.status_code == 400:
+            try:
+                err_data = response.json()
+                if err_data.get("code") == "INVALID_CHECKPOINT" and checkpoint != 0:
+                    logger.warning("Kineis INVALID_CHECKPOINT, retried with checkpoint=0")
+                    body_retry = {**body, "fromCheckpoint": 0}
+                    response = await client.post(url, json=body_retry, headers=headers)
+            except (ValueError, TypeError):
+                pass
         response.raise_for_status()
         data = response.json()
 
