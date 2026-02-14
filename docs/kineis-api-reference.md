@@ -145,6 +145,7 @@ The `/retrieve-realtime` endpoint uses a checkpoint mechanism:
 2. Response includes new `checkpoint` value
 3. Subsequent calls: pass previous `checkpoint` → returns only new messages
 4. **Minimum interval: 60 seconds** between calls (API rate limit)
+5. The API requires the checkpoint to be within the last **1 hour** (current time minus 3,600,000 ms). If the stored checkpoint is older, the API returns 400 `INVALID_CHECKPOINT`. This integration handles that by retrying the request with `fromCheckpoint: 0` once, then persisting the new checkpoint.
 
 ```python
 # Pseudocode
