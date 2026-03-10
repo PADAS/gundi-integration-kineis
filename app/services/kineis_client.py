@@ -134,6 +134,7 @@ async def retrieve_bulk_telemetry(
 
     all_messages: List[Dict[str, Any]] = []
     after: Optional[str] = None
+    page_num = 0
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
         while True:
@@ -155,6 +156,12 @@ async def retrieve_bulk_telemetry(
             elif device_uids:
                 body["deviceUids"] = device_uids
 
+            page_num += 1
+            logger.info(
+                "Kineis retrieve-bulk request (page %d): POST %s body=%s",
+                page_num, url, body,
+            )
+
             response = await client.post(
                 url,
                 json=body,
@@ -163,6 +170,11 @@ async def retrieve_bulk_telemetry(
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
+            )
+
+            logger.info(
+                "Kineis retrieve-bulk response (page %d): status=%d",
+                page_num, response.status_code,
             )
 
             if response.status_code == 401:
@@ -188,12 +200,20 @@ async def retrieve_bulk_telemetry(
 
             page_info = data.get("pageInfo") or data.get("page_info") or {}
             has_next = page_info.get("hasNextPage", page_info.get("has_next_page", False))
+
+            page_message_count = len(contents) if isinstance(contents, list) else len(data.get("edges", []))
+            logger.info(
+                "Kineis retrieve-bulk page %d: %d messages, hasNextPage=%s",
+                page_num, page_message_count, has_next,
+            )
+
             if not has_next:
                 break
             after = page_info.get("endCursor") or page_info.get("end_cursor")
             if not after:
                 break
 
+    logger.info("Kineis retrieve-bulk complete: %d total messages across %d pages", len(all_messages), page_num)
     return all_messages
 
 
@@ -228,6 +248,8 @@ async def retrieve_realtime_telemetry(
     elif device_uids:
         body["deviceUids"] = device_uids
 
+    logger.info("Kineis retrieve-realtime request: POST %s body=%s", url, body)
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -235,6 +257,7 @@ async def retrieve_realtime_telemetry(
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
         response = await client.post(url, json=body, headers=headers)
+        logger.info("Kineis retrieve-realtime response: status=%d", response.status_code)
         if response.status_code == 401:
             raise httpx.HTTPStatusError(
                 "Unauthorized",
@@ -244,10 +267,12 @@ async def retrieve_realtime_telemetry(
         if response.status_code == 400:
             try:
                 err_data = response.json()
+                logger.warning("Kineis retrieve-realtime 400 error: %s", err_data)
                 if err_data.get("code") == "INVALID_CHECKPOINT" and checkpoint != 0:
-                    logger.warning("Kineis INVALID_CHECKPOINT, retried with checkpoint=0")
+                    logger.warning("Kineis INVALID_CHECKPOINT (checkpoint=%d), retrying with checkpoint=0", checkpoint)
                     body_retry = {**body, "fromCheckpoint": 0}
                     response = await client.post(url, json=body_retry, headers=headers)
+                    logger.info("Kineis retrieve-realtime retry response: status=%d", response.status_code)
             except (ValueError, TypeError):
                 pass
         response.raise_for_status()
@@ -255,6 +280,11 @@ async def retrieve_realtime_telemetry(
 
     contents = data.get("contents") or []
     new_checkpoint = data.get("checkpoint", checkpoint)
+    message_count = len(contents) if isinstance(contents, list) else 0
+    logger.info(
+        "Kineis retrieve-realtime complete: %d messages, checkpoint %d -> %d",
+        message_count, checkpoint, new_checkpoint,
+    )
     return list(contents) if isinstance(contents, list) else [], new_checkpoint
 
 
@@ -269,6 +299,8 @@ async def retrieve_device_list(
     base = api_base_url or settings.KINEIS_API_BASE_URL
     url = base.rstrip("/") + "/telemetry/api/v1/retrieve-device-list"
 
+    logger.info("Kineis retrieve-device-list request: POST %s", url)
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         response = await client.post(
             url,
@@ -279,6 +311,7 @@ async def retrieve_device_list(
                 "Accept": "application/json",
             },
         )
+        logger.info("Kineis retrieve-device-list response: status=%d", response.status_code)
         if response.status_code == 401:
             raise httpx.HTTPStatusError(
                 "Unauthorized",
@@ -289,7 +322,9 @@ async def retrieve_device_list(
         data = response.json()
 
     contents = data.get("contents") or []
-    return list(contents) if isinstance(contents, list) else []
+    device_list = list(contents) if isinstance(contents, list) else []
+    logger.info("Kineis retrieve-device-list complete: %d devices", len(device_list))
+    return device_list
 
 
 @stamina.retry(on=httpx.HTTPError, wait_initial=10.0, wait_jitter=10.0, wait_max=300.0)
