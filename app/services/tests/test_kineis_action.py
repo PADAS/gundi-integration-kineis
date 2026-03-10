@@ -142,7 +142,7 @@ async def test_action_pull_telemetry_batches_large_result(
         {
             "deviceRef": f"D{i}",
             "recordedAt": "2024-01-15T10:00:00.000Z",
-            "gps": {"lat": 0, "lon": 0},
+            "gps": {"lat": 5.0, "lon": 10.0},
         }
         for i in range(n)
     ]

@@ -1,8 +1,12 @@
 """Tests for Kineis telemetry to Gundi observation mapping (CONNECTORS-836)."""
 
+import json
+import os
 import pytest
 
 from app.actions.transformers import (
+    LocationType,
+    classify_message_location,
     telemetry_to_observation,
     telemetry_batch_to_observations,
     telemetry_batch_to_observations_detailed,
@@ -42,7 +46,7 @@ def test_telemetry_to_observation_missing_source_returns_none():
     """Return None when deviceRef is missing."""
     msg = {
         "recordedAt": "2024-01-15T10:00:00Z",
-        "gps": {"lat": 0, "lon": 0},
+        "gps": {"lat": 1.0, "lon": 1.0},
     }
     assert telemetry_to_observation(msg) is None
 
@@ -60,7 +64,7 @@ def test_telemetry_to_observation_missing_timestamp_returns_none():
     """Return None when no timestamp field."""
     msg = {
         "deviceRef": "D1",
-        "gps": {"lat": 0, "lon": 0},
+        "gps": {"lat": 1.0, "lon": 1.0},
     }
     assert telemetry_to_observation(msg) is None
 
@@ -70,7 +74,7 @@ def test_telemetry_to_observation_additional_fields():
     msg = {
         "deviceRef": "D1",
         "recordedAt": "2024-01-15T10:00:00.000Z",
-        "gps": {"lat": 0, "lon": 0, "speed": 5.2, "course": 90},
+        "gps": {"lat": 5.0, "lon": 10.0, "speed": 5.2, "course": 90},
     }
     obs = telemetry_to_observation(msg)
     assert obs is not None
@@ -82,7 +86,7 @@ def test_telemetry_to_observation_additional_fields():
 def test_telemetry_batch_to_observations_skips_invalid():
     """Invalid messages are skipped; valid ones are returned. Source is deviceRef only."""
     messages = [
-        {"deviceRef": "A", "recordedAt": "2024-01-15T10:00:00Z", "gps": {"lat": 0, "lon": 0}},
+        {"deviceRef": "A", "recordedAt": "2024-01-15T10:00:00Z", "gps": {"lat": 5.0, "lon": 10.0}},
         {"deviceRef": "B"},  # missing location and timestamp
         {"deviceUid": 1, "timestamp": "2024-01-15T11:00:00Z", "lat": 1, "lon": 1},  # no deviceRef -> skipped
     ]
@@ -112,13 +116,13 @@ def test_telemetry_to_observation_api_shape_doppler_loc():
         "deviceRef": "1788",
         "deviceUid": 1788,
         "acqTs": 1705316400000,
-        "dopplerLocLat": 0.0,
-        "dopplerLocLon": 0.0,
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
     }
     obs = telemetry_to_observation(msg)
     assert obs is not None
     assert obs["source"] == "1788"
-    assert obs["location"] == {"lat": 0.0, "lon": 0.0}
+    assert obs["location"] == {"lat": -42.47, "lon": 173.63}
 
 
 def test_telemetry_to_observation_sample_response_gps_fix():
@@ -174,8 +178,8 @@ def test_telemetry_to_observation_source_name_fallback_without_customer_name():
     msg = {
         "deviceUid": 99999,
         "deviceRef": "ref99",
-        "gpsLocLat": 0,
-        "gpsLocLon": 0,
+        "gpsLocLat": 5.0,
+        "gpsLocLon": 10.0,
         "msgTs": 1705312800000,
     }
     device_uid_to_customer_name = {67899: "WILDLIFE COMPUTER"}  # ref99 not in map
@@ -210,7 +214,7 @@ def test_detailed_transform_tracks_skip_reasons():
     """Detailed transform returns skip reason counts and message type breakdown."""
     messages = [
         # Valid: has deviceRef, location, timestamp
-        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 0, "gpsLocLon": 0, "msgType": "operation-mo-pdrgroup"},
+        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 5.0, "gpsLocLon": 10.0, "msgType": "operation-mo-pdrgroup"},
         # Skipped: no deviceRef
         {"deviceUid": 1, "msgDatetime": "2024-01-15T11:00:00Z", "gpsLocLat": 1, "gpsLocLon": 1, "msgType": "operation-mo-event"},
         # Skipped: no location
@@ -239,7 +243,7 @@ def test_detailed_transform_tracks_skip_reasons():
 def test_detailed_transform_all_valid():
     """When all messages are valid, skip counts are zero."""
     messages = [
-        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 0, "gpsLocLon": 0},
+        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 5.0, "gpsLocLon": 10.0},
     ]
     result = telemetry_batch_to_observations_detailed(messages)
     assert len(result.observations) == 1
@@ -253,3 +257,224 @@ def test_detailed_transform_empty_input():
     assert len(result.observations) == 0
     assert result.total_skipped == 0
     assert result.msg_types_seen == {}
+
+
+# --- Classification tests ---
+
+
+def test_classify_gps_flat_fields():
+    """gpsLocLat/gpsLocLon → LocationType.GPS with correct coords."""
+    msg = {"gpsLocLat": 20.45, "gpsLocLon": 58.77}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.GPS
+    assert lat == 20.45
+    assert lon == 58.77
+
+
+def test_classify_doppler_flat_fields():
+    """dopplerLocLat/dopplerLocLon (no GPS) → LocationType.DOPPLER."""
+    msg = {"dopplerLocLat": -42.47, "dopplerLocLon": 173.63}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.DOPPLER
+    assert lat == -42.47
+    assert lon == 173.63
+
+
+def test_classify_nested_gps_dict():
+    """{"gps": {"lat": ..., "lon": ...}} → LocationType.GPS."""
+    msg = {"gps": {"lat": -1.5, "lon": 30.2}}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.GPS
+    assert lat == -1.5
+    assert lon == 30.2
+
+
+def test_classify_both_prefers_gps():
+    """Message with both GPS and Doppler fields → LocationType.GPS."""
+    msg = {
+        "gpsLocLat": 20.45,
+        "gpsLocLon": 58.77,
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
+    }
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.GPS
+    assert lat == 20.45
+    assert lon == 58.77
+
+
+def test_classify_no_location():
+    """No GPS or Doppler fields → LocationType.NONE."""
+    msg = {"deviceRef": "123", "msgDatetime": "2024-01-15T10:00:00Z"}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.NONE
+    assert lat is None
+    assert lon is None
+
+
+def test_classify_message_example():
+    """docs/message-example.json shape (Doppler only, operation-mo-event) → LocationType.DOPPLER."""
+    example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "message-example.json")
+    with open(example_path) as f:
+        msg = json.load(f)
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.DOPPLER
+    assert lat == -42.47563
+    assert lon == 173.63476
+
+
+def test_observation_location_type_gps():
+    """GPS observation has location_type 'gps'."""
+    msg = {
+        "deviceRef": "A",
+        "msgDatetime": "2024-01-15T10:00:00Z",
+        "gpsLocLat": 20.45,
+        "gpsLocLon": 58.77,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    assert obs["location_type"] == "gps"
+
+
+def test_observation_location_type_doppler():
+    """Doppler observation has location_type 'doppler'."""
+    msg = {
+        "deviceRef": "A",
+        "msgDatetime": "2024-01-15T10:00:00Z",
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    assert obs["location_type"] == "doppler"
+
+
+def test_doppler_uses_doppler_datetime():
+    """Doppler-only message with dopplerDatetime uses it for recorded_at."""
+    msg = {
+        "deviceRef": "45009",
+        "dopplerDatetime": "2026-03-10T19:48:46.381Z",
+        "msgDatetime": "2026-03-10T19:48:46.318Z",
+        "dopplerLocLat": -42.47563,
+        "dopplerLocLon": 173.63476,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    # dopplerDatetime comes after gpsLocDatetime in priority, but before msgDatetime
+    # Since no gpsLocDatetime, dopplerDatetime is used
+    assert obs["recorded_at"] == "2026-03-10T19:48:46.381Z"
+    assert obs["location_type"] == "doppler"
+
+
+# --- Zero-zero coordinate filtering tests ---
+
+
+def test_classify_rejects_zero_zero_doppler():
+    """Doppler at (0, 0) → LocationType.NONE."""
+    msg = {"dopplerLocLat": 0.0, "dopplerLocLon": 0.0}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.NONE
+    assert lat is None
+    assert lon is None
+
+
+def test_classify_rejects_zero_zero_gps():
+    """GPS at (0, 0) → LocationType.NONE."""
+    msg = {"gpsLocLat": 0.0, "gpsLocLon": 0.0}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.NONE
+    assert lat is None
+    assert lon is None
+
+
+def test_classify_gps_zero_zero_falls_through_to_doppler():
+    """GPS (0, 0) + valid Doppler → LocationType.DOPPLER."""
+    msg = {
+        "gpsLocLat": 0.0,
+        "gpsLocLon": 0.0,
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
+    }
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.DOPPLER
+    assert lat == -42.47
+    assert lon == 173.63
+
+
+def test_classify_rejects_out_of_range():
+    """Out-of-range coordinates → LocationType.NONE."""
+    msg = {"gpsLocLat": 999.0, "gpsLocLon": 58.77}
+    loc_type, lat, lon = classify_message_location(msg)
+    assert loc_type == LocationType.NONE
+
+    msg2 = {"gpsLocLat": 20.0, "gpsLocLon": -999.0}
+    loc_type2, _, _ = classify_message_location(msg2)
+    assert loc_type2 == LocationType.NONE
+
+
+# --- Doppler confidence and error radius tests ---
+
+
+def test_observation_doppler_confidence():
+    """Doppler observation has location_confidence from classifier."""
+    msg = {
+        "deviceRef": "A",
+        "msgDatetime": "2024-01-15T10:00:00Z",
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
+        "dopplerLocClass": "3",
+        "dopplerLocErrorRadius": 200.0,
+        "dopplerNbMsg": 4,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    assert obs["location_confidence"] == "high"
+
+
+def test_observation_doppler_error_radius():
+    """Doppler observation has location_error_m from message."""
+    msg = {
+        "deviceRef": "A",
+        "msgDatetime": "2024-01-15T10:00:00Z",
+        "dopplerLocLat": -42.47,
+        "dopplerLocLon": 173.63,
+        "dopplerLocErrorRadius": 1547.0,
+        "dopplerLocClass": "B",
+        "dopplerNbMsg": 2,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    assert obs["location_error_m"] == 1547.0
+    assert obs["location_confidence"] == "low"
+
+
+def test_observation_gps_confidence_high():
+    """GPS observation has location_confidence 'high' and no error radius."""
+    msg = {
+        "deviceRef": "A",
+        "msgDatetime": "2024-01-15T10:00:00Z",
+        "gpsLocLat": 20.45,
+        "gpsLocLon": 58.77,
+    }
+    obs = telemetry_to_observation(msg)
+    assert obs is not None
+    assert obs["location_confidence"] == "high"
+    assert obs["location_error_m"] is None
+
+
+def test_detailed_transform_tracks_zero_zero():
+    """Zero-zero messages counted in skip reasons as 'zero_zero_coordinates'."""
+    messages = [
+        # Valid
+        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 5.0, "gpsLocLon": 10.0},
+        # Zero-zero GPS
+        {"deviceRef": "B", "msgDatetime": "2024-01-15T11:00:00Z", "gpsLocLat": 0.0, "gpsLocLon": 0.0},
+        # Zero-zero Doppler
+        {"deviceRef": "C", "msgDatetime": "2024-01-15T12:00:00Z", "dopplerLocLat": 0.0, "dopplerLocLon": 0.0},
+    ]
+    result = telemetry_batch_to_observations_detailed(messages)
+    assert len(result.observations) == 1
+    assert result.total_skipped == 2
+    assert result.skipped_no_location == 2
+    assert result.skip_reasons.get("zero_zero_coordinates") == 2
+    assert "no_location" not in result.skip_reasons
