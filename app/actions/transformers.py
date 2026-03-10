@@ -121,6 +121,40 @@ def telemetry_to_observation(
     }
 
 
+class TransformResult:
+    """Result of batch transformation with skip reason counts."""
+
+    def __init__(self):
+        self.observations: List[Dict[str, Any]] = []
+        self.skipped_no_device_ref: int = 0
+        self.skipped_no_timestamp: int = 0
+        self.skipped_no_location: int = 0
+        self.skipped_invalid_location: int = 0
+        self.msg_types_seen: Dict[str, int] = {}
+
+    @property
+    def total_skipped(self) -> int:
+        return (
+            self.skipped_no_device_ref
+            + self.skipped_no_timestamp
+            + self.skipped_no_location
+            + self.skipped_invalid_location
+        )
+
+    @property
+    def skip_reasons(self) -> Dict[str, int]:
+        reasons = {}
+        if self.skipped_no_device_ref:
+            reasons["no_device_ref"] = self.skipped_no_device_ref
+        if self.skipped_no_timestamp:
+            reasons["no_timestamp"] = self.skipped_no_timestamp
+        if self.skipped_no_location:
+            reasons["no_location"] = self.skipped_no_location
+        if self.skipped_invalid_location:
+            reasons["invalid_location"] = self.skipped_invalid_location
+        return reasons
+
+
 def telemetry_batch_to_observations(
     messages: List[Dict[str, Any]],
     device_uid_to_customer_name: Optional[Dict[int, str]] = None,
@@ -129,12 +163,63 @@ def telemetry_batch_to_observations(
     Map a list of telemetry messages to Gundi observations. Skips invalid messages.
     When device_uid_to_customer_name is provided, source_name is "source (customerName)" when available.
     """
-    observations = []
+    result = telemetry_batch_to_observations_detailed(
+        messages, device_uid_to_customer_name=device_uid_to_customer_name,
+    )
+    return result.observations
+
+
+def telemetry_batch_to_observations_detailed(
+    messages: List[Dict[str, Any]],
+    device_uid_to_customer_name: Optional[Dict[int, str]] = None,
+) -> TransformResult:
+    """
+    Map a list of telemetry messages to Gundi observations with detailed skip tracking.
+    Returns a TransformResult with observations, skip reason counts, and message type breakdown.
+    """
+    result = TransformResult()
     for msg in messages:
+        msg_type = msg.get("msgType", "unknown")
+        result.msg_types_seen[msg_type] = result.msg_types_seen.get(msg_type, 0) + 1
+
         obs = telemetry_to_observation(
             msg,
             device_uid_to_customer_name=device_uid_to_customer_name,
         )
         if obs:
-            observations.append(obs)
-    return observations
+            result.observations.append(obs)
+        else:
+            # Determine skip reason (same logic order as telemetry_to_observation)
+            if msg.get("deviceRef") is None:
+                result.skipped_no_device_ref += 1
+            elif _has_no_timestamp(msg):
+                result.skipped_no_timestamp += 1
+            elif _has_no_location(msg):
+                result.skipped_no_location += 1
+            else:
+                result.skipped_invalid_location += 1
+    return result
+
+
+def _has_no_timestamp(msg: Dict[str, Any]) -> bool:
+    """Check if a message has no usable timestamp."""
+    return not any(msg.get(f) for f in (
+        "gpsLocDatetime", "recordedAt", "msgDatetime", "acqDatetime",
+        "timestamp", "receivedAt", "date", "msgTs", "acqTs", "gpsLocTs",
+    ))
+
+
+def _has_no_location(msg: Dict[str, Any]) -> bool:
+    """Check if a message has no usable location coordinates."""
+    gps = msg.get("gps") or msg.get("location") or msg.get("position") or {}
+    if isinstance(gps, dict):
+        lat = gps.get("lat") if gps.get("lat") is not None else gps.get("latitude")
+        lon = gps.get("lon") if gps.get("lon") is not None else (gps.get("longitude") or gps.get("lng"))
+        if lat is not None and lon is not None:
+            return False
+    for lat_key in ("gpsLocLat", "lat", "latitude", "dopplerLocLat"):
+        if msg.get(lat_key) is not None:
+            for lon_key in ("gpsLocLon", "lon", "longitude", "dopplerLocLon"):
+                if msg.get(lon_key) is not None:
+                    return False
+    return True

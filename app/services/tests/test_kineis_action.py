@@ -248,3 +248,72 @@ async def test_action_pull_telemetry_source_name_from_device_list(
     assert len(observations) == 1
     assert observations[0]["source"] == "7896"
     assert observations[0]["source_name"] == "7896 (WILDLIFE COMPUTER)"
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_no_messages(
+    mocker, integration_with_id, pull_telemetry_config, authenticate_kineis_config
+):
+    """When no messages are returned, early-return without calling send or device list."""
+    mock_fetch = AsyncMock(return_value=[])
+    mock_send = AsyncMock(return_value={})
+    mock_device_list = AsyncMock(return_value=[])
+    mock_log = AsyncMock()
+    mocker.patch("app.actions.handlers.fetch_telemetry", mock_fetch)
+    mocker.patch("app.actions.handlers.fetch_device_list", mock_device_list)
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", mock_log)
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id,
+        action_config=pull_telemetry_config,
+    )
+
+    assert result == {"messages_fetched": 0, "observations_sent": 0, "skipped": 0}
+    mock_send.assert_not_called()
+    mock_device_list.assert_not_called()
+    # Should log "No new telemetry messages"
+    log_calls = [call for call in mock_log.call_args_list if "No new telemetry" in str(call)]
+    assert len(log_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_all_skipped_logs_warning(
+    mocker, integration_with_id, pull_telemetry_config, authenticate_kineis_config
+):
+    """When messages are fetched but all are skipped, log a WARNING with skip reasons."""
+    # Messages with no location — all will be skipped
+    sample_messages = [
+        {"deviceRef": "D1", "msgDatetime": "2024-01-15T10:00:00Z", "msgType": "operation-mo-event"},
+        {"deviceRef": "D2", "msgDatetime": "2024-01-15T11:00:00Z", "msgType": "operation-mo-event"},
+    ]
+    mock_fetch = AsyncMock(return_value=sample_messages)
+    mock_send = AsyncMock(return_value={})
+    mock_log = AsyncMock()
+    mocker.patch("app.actions.handlers.fetch_telemetry", mock_fetch)
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", mock_log)
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id,
+        action_config=pull_telemetry_config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 0
+    assert result["skipped"] == 2
+    mock_send.assert_not_called()
+    # Should log WARNING with "No observations could be created"
+    warning_calls = [
+        call for call in mock_log.call_args_list
+        if "No observations could be created" in str(call)
+    ]
+    assert len(warning_calls) == 1
+    log_data = warning_calls[0][1]["data"]
+    assert "skip_reasons" in log_data
+    assert log_data["skip_reasons"]["no_location"] == 2

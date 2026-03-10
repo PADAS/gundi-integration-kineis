@@ -5,6 +5,7 @@ import pytest
 from app.actions.transformers import (
     telemetry_to_observation,
     telemetry_batch_to_observations,
+    telemetry_batch_to_observations_detailed,
     GUNDI_OBSERVATION_TYPE,
 )
 
@@ -203,3 +204,52 @@ def test_telemetry_batch_to_observations_source_name_with_customer_name():
     assert len(result) == 1
     assert result[0]["source"] == "7896"
     assert result[0]["source_name"] == "7896 (WILDLIFE COMPUTER)"
+
+
+def test_detailed_transform_tracks_skip_reasons():
+    """Detailed transform returns skip reason counts and message type breakdown."""
+    messages = [
+        # Valid: has deviceRef, location, timestamp
+        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 0, "gpsLocLon": 0, "msgType": "operation-mo-pdrgroup"},
+        # Skipped: no deviceRef
+        {"deviceUid": 1, "msgDatetime": "2024-01-15T11:00:00Z", "gpsLocLat": 1, "gpsLocLon": 1, "msgType": "operation-mo-event"},
+        # Skipped: no location
+        {"deviceRef": "B", "msgDatetime": "2024-01-15T12:00:00Z", "msgType": "operation-mo-event"},
+        # Skipped: no timestamp
+        {"deviceRef": "C", "gpsLocLat": 2, "gpsLocLon": 2, "msgType": "operation-mo-pdrgroup"},
+    ]
+    result = telemetry_batch_to_observations_detailed(messages)
+    assert len(result.observations) == 1
+    assert result.observations[0]["source"] == "A"
+    assert result.total_skipped == 3
+    assert result.skipped_no_device_ref == 1
+    assert result.skipped_no_location == 1
+    assert result.skipped_no_timestamp == 1
+    assert result.skip_reasons == {
+        "no_device_ref": 1,
+        "no_location": 1,
+        "no_timestamp": 1,
+    }
+    assert result.msg_types_seen == {
+        "operation-mo-pdrgroup": 2,
+        "operation-mo-event": 2,
+    }
+
+
+def test_detailed_transform_all_valid():
+    """When all messages are valid, skip counts are zero."""
+    messages = [
+        {"deviceRef": "A", "msgDatetime": "2024-01-15T10:00:00Z", "gpsLocLat": 0, "gpsLocLon": 0},
+    ]
+    result = telemetry_batch_to_observations_detailed(messages)
+    assert len(result.observations) == 1
+    assert result.total_skipped == 0
+    assert result.skip_reasons == {}
+
+
+def test_detailed_transform_empty_input():
+    """Empty input returns empty result."""
+    result = telemetry_batch_to_observations_detailed([])
+    assert len(result.observations) == 0
+    assert result.total_skipped == 0
+    assert result.msg_types_seen == {}
