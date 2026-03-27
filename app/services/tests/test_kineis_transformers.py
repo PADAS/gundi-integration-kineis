@@ -414,6 +414,21 @@ def test_classify_rejects_out_of_range():
     assert loc_type2 == LocationType.NONE
 
 
+def test_detailed_transform_string_coordinates_do_not_crash():
+    """Non-numeric coordinate values are treated as invalid, not zero-zero, without raising."""
+    messages = [
+        {
+            "deviceRef": "A",
+            "msgDatetime": "2024-01-15T10:00:00Z",
+            "gpsLocLat": "not-a-number",
+            "gpsLocLon": "not-a-number",
+        }
+    ]
+    result = telemetry_batch_to_observations_detailed(messages)
+    assert result.total_skipped == 1
+    assert result.skip_reasons.get("zero_zero_coordinates", 0) == 0
+
+
 # --- Doppler confidence and error radius tests ---
 
 

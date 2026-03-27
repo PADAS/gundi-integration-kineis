@@ -43,10 +43,10 @@ PubSub message → `POST /` (main.py) → base64-decodes payload → `execute_ac
 
 - **`app/actions/handlers.py`** — Two actions: `action_auth` (credential verification) and `action_pull_telemetry` (scheduled every 2 min). Pull telemetry has two paths: realtime (checkpoint-based, default) and bulk (lookback window fallback).
 - **`app/actions/configurations.py`** — Pydantic configs: `AuthenticateKineisConfig`, `PullTelemetryConfiguration`. `get_auth_config(integration)` extracts credentials from the integration's auth action config (not from env).
-- **`app/actions/transformers.py`** — `telemetry_batch_to_observations()` maps CLS messages to Gundi observation dicts. Handles GPS (`gpsLocLat`/`gpsLocLon`) and Doppler (`dopplerLocLat`/`dopplerLocLon`) locations.
+- **`app/actions/transformers.py`** — `telemetry_batch_to_observations_detailed()` maps CLS messages to Gundi observation dicts. Handles GPS (`gpsLocLat`/`gpsLocLon`) and Doppler (`dopplerLocLat`/`dopplerLocLon`) locations.
 - **`app/services/kineis_client.py`** — Async CLS API client: token cache, `fetch_telemetry` (bulk with cursor pagination), `fetch_telemetry_realtime` (checkpoint-based), `fetch_device_list`. Single device list filter: `deviceRefs` **or** `deviceUids`, not both.
 - **`app/services/state.py`** — `IntegrationStateManager` (Redis): get/set state per integration+action. Used for the realtime checkpoint (`kineis_realtime_checkpoint` key).
-- **`app/datasource/kineis_client.py`** — Reference/example client (not used by action runner). Illustrates sync patterns.
+- **`app/datasource/kineis.py`** — Reference/example client (not used by action runner). Illustrates sync patterns.
 
 ### Framework (inherited, don't edit)
 

@@ -269,7 +269,13 @@ def _has_coordinates_but_zero_zero(message: Dict[str, Any]) -> bool:
     if not coord_pairs:
         return False
 
-    return all(is_zero_zero(lat, lon) for lat, lon in coord_pairs)
+    def _safe_is_zero_zero(lat, lon) -> bool:
+        try:
+            return is_zero_zero(float(lat), float(lon))
+        except (TypeError, ValueError):
+            return False
+
+    return all(_safe_is_zero_zero(lat, lon) for lat, lon in coord_pairs)
 
 
 class TransformResult:
