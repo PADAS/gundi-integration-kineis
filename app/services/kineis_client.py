@@ -158,9 +158,11 @@ async def retrieve_bulk_telemetry(
 
             page_num += 1
             logger.info(
-                "Kineis retrieve-bulk request (page %d): POST %s body=%s",
-                page_num, url, body,
+                "Kineis retrieve-bulk request (page %d): from=%s to=%s page_size=%d devices=%s",
+                page_num, from_datetime, to_datetime, page_size,
+                f"{len(device_refs)} refs" if device_refs else f"{len(device_uids)} uids" if device_uids else "all",
             )
+            logger.debug("Kineis retrieve-bulk request body (page %d): %s", page_num, body)
 
             response = await client.post(
                 url,
@@ -248,7 +250,12 @@ async def retrieve_realtime_telemetry(
     elif device_uids:
         body["deviceUids"] = device_uids
 
-    logger.info("Kineis retrieve-realtime request: POST %s body=%s", url, body)
+    logger.info(
+        "Kineis retrieve-realtime request: checkpoint=%d devices=%s",
+        checkpoint,
+        f"{len(device_refs)} refs" if device_refs else f"{len(device_uids)} uids" if device_uids else "all",
+    )
+    logger.debug("Kineis retrieve-realtime request body: %s", body)
 
     headers = {
         "Authorization": f"Bearer {access_token}",

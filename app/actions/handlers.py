@@ -128,7 +128,8 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
     if not messages:
         log_data = {"messages_fetched": 0}
         if use_realtime:
-            log_data["checkpoint"] = checkpoint
+            log_data["checkpoint_from"] = checkpoint
+            log_data["checkpoint_to"] = new_checkpoint
         await log_action_activity(
             integration_id=integration_id,
             action_id=action_id,

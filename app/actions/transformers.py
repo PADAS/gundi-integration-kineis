@@ -226,28 +226,50 @@ def _has_no_timestamp(message: Dict[str, Any]) -> bool:
     return ts is None
 
 
+def _has_any_coordinates(message: Dict[str, Any]) -> bool:
+    """Return True if the message contains any coordinate fields (regardless of validity)."""
+    if message.get("gpsLocLat") is not None and message.get("gpsLocLon") is not None:
+        return True
+    if message.get("dopplerLocLat") is not None and message.get("dopplerLocLon") is not None:
+        return True
+    gps_dict = message.get("gps") or message.get("location") or message.get("position") or {}
+    if isinstance(gps_dict, dict):
+        lat = gps_dict.get("lat") if gps_dict.get("lat") is not None else gps_dict.get("latitude")
+        lon = gps_dict.get("lon") if gps_dict.get("lon") is not None else (gps_dict.get("longitude") or gps_dict.get("lng"))
+        if lat is not None and lon is not None:
+            return True
+    return False
+
+
 def _has_coordinates_but_zero_zero(message: Dict[str, Any]) -> bool:
-    """Check if a message has coordinates present but all at (0, 0)."""
+    """Return True only when all present coordinate pairs are exactly (0, 0)."""
     gps_lat = message.get("gpsLocLat")
     gps_lon = message.get("gpsLocLon")
     has_gps = gps_lat is not None and gps_lon is not None
 
+    nested_lat, nested_lon = None, None
     gps_dict = message.get("gps") or message.get("location") or message.get("position") or {}
-    has_nested = False
     if isinstance(gps_dict, dict):
-        lat = gps_dict.get("lat") if gps_dict.get("lat") is not None else gps_dict.get("latitude")
-        lon = gps_dict.get("lon") if gps_dict.get("lon") is not None else (gps_dict.get("longitude") or gps_dict.get("lng"))
-        has_nested = lat is not None and lon is not None
+        nested_lat = gps_dict.get("lat") if gps_dict.get("lat") is not None else gps_dict.get("latitude")
+        nested_lon = gps_dict.get("lon") if gps_dict.get("lon") is not None else (gps_dict.get("longitude") or gps_dict.get("lng"))
+    has_nested = nested_lat is not None and nested_lon is not None
 
     doppler_lat = message.get("dopplerLocLat")
     doppler_lon = message.get("dopplerLocLon")
     has_doppler = doppler_lat is not None and doppler_lon is not None
 
-    if not (has_gps or has_nested or has_doppler):
+    coord_pairs = []
+    if has_gps:
+        coord_pairs.append((gps_lat, gps_lon))
+    if has_nested:
+        coord_pairs.append((nested_lat, nested_lon))
+    if has_doppler:
+        coord_pairs.append((doppler_lat, doppler_lon))
+
+    if not coord_pairs:
         return False
 
-    # Has coordinates but classification returned NONE — means all were invalid
-    return classify_message_location(message)[0] == LocationType.NONE
+    return all(is_zero_zero(lat, lon) for lat, lon in coord_pairs)
 
 
 class TransformResult:
@@ -297,6 +319,8 @@ def telemetry_batch_to_observations_detailed(
             result.skipped_no_location += 1
             if _has_coordinates_but_zero_zero(msg):
                 reason = "zero_zero_coordinates"
+            elif _has_any_coordinates(msg):
+                reason = "invalid_coordinates"
             else:
                 reason = "no_location"
             result.skip_reasons[reason] = result.skip_reasons.get(reason, 0) + 1
