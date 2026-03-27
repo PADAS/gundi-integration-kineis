@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict
 
 from app.actions.configurations import AuthenticateKineisConfig, PullTelemetryConfiguration, get_auth_config
-from app.actions.transformers import telemetry_batch_to_observations
+from app.actions.transformers import telemetry_batch_to_observations_detailed
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_observations_to_gundi
@@ -125,13 +125,19 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             client_id=auth_config.client_id,
         )
 
-    await log_action_activity(
-        integration_id=integration_id,
-        action_id=action_id,
-        title="Fetched telemetry messages, mapping to observations",
-        level=LogLevel.INFO,
-        data={"messages_count": len(messages)},
-    )
+    if not messages:
+        log_data = {"messages_fetched": 0}
+        if use_realtime:
+            log_data["checkpoint_from"] = checkpoint
+            log_data["checkpoint_to"] = new_checkpoint
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id=action_id,
+            title="No new telemetry messages from Kineis",
+            level=LogLevel.INFO,
+            data=log_data,
+        )
+        return {"messages_fetched": 0, "observations_sent": 0, "skipped": 0}
 
     device_uid_to_customer_name: Dict[int, str] = {}
     try:
@@ -149,19 +155,12 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
     except Exception as e:
         logger.warning("Could not fetch device list for source_name, using fallback: %s", e)
 
-    observations = telemetry_batch_to_observations(
+    transform_result = telemetry_batch_to_observations_detailed(
         messages,
         device_uid_to_customer_name=device_uid_to_customer_name,
     )
-    skipped = len(messages) - len(observations)
-    if skipped:
-        await log_action_activity(
-            integration_id=integration_id,
-            action_id=action_id,
-            title="Some messages skipped (missing location or timestamp)",
-            level=LogLevel.INFO,
-            data={"skipped": skipped},
-        )
+    observations = transform_result.observations
+    skipped = transform_result.total_skipped
 
     sent_total = 0
     for batch in generate_batches(observations, OBSERVATION_BATCH_SIZE):
@@ -171,13 +170,33 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
         )
         sent_total += len(batch)
 
-    await log_action_activity(
-        integration_id=integration_id,
-        action_id=action_id,
-        title="Sent observations to Gundi",
-        level=LogLevel.INFO,
-        data={"observations_sent": sent_total},
-    )
+    # Build a single meaningful summary log
+    summary_data: Dict = {
+        "messages_fetched": len(messages),
+        "observations_sent": sent_total,
+    }
+    if transform_result.msg_types_seen:
+        summary_data["message_types"] = transform_result.msg_types_seen
+    if skipped:
+        summary_data["skipped"] = skipped
+        summary_data["skip_reasons"] = transform_result.skip_reasons
+
+    if sent_total > 0:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id=action_id,
+            title=f"Sent {sent_total} observations to Gundi ({skipped} messages skipped)" if skipped else f"Sent {sent_total} observations to Gundi",
+            level=LogLevel.INFO,
+            data=summary_data,
+        )
+    else:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id=action_id,
+            title=f"No observations could be created from {len(messages)} messages",
+            level=LogLevel.WARNING,
+            data=summary_data,
+        )
 
     return {
         "messages_fetched": len(messages),
