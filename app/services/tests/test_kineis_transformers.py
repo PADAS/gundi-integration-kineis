@@ -1,7 +1,5 @@
 """Tests for Kineis telemetry to Gundi observation mapping (CONNECTORS-836)."""
 
-import json
-import os
 import pytest
 
 from app.actions.transformers import (
@@ -70,7 +68,7 @@ def test_telemetry_to_observation_missing_timestamp_returns_none():
 
 
 def test_telemetry_to_observation_additional_fields():
-    """Additional contains full record with original property names."""
+    """Additional contains full record with original property names plus location metadata."""
     msg = {
         "deviceRef": "D1",
         "recordedAt": "2024-01-15T10:00:00.000Z",
@@ -78,7 +76,14 @@ def test_telemetry_to_observation_additional_fields():
     }
     obs = telemetry_to_observation(msg)
     assert obs is not None
-    assert obs["additional"] == msg
+    # All original fields are preserved in additional
+    assert obs["additional"]["deviceRef"] == msg["deviceRef"]
+    assert obs["additional"]["recordedAt"] == msg["recordedAt"]
+    assert obs["additional"]["gps"] == msg["gps"]
+    # Transformer enriches additional with location metadata
+    assert obs["additional"]["location_type"] == "gps"
+    assert obs["additional"]["location_confidence"] == "high"
+    assert obs["additional"]["location_error_m"] is None
     assert obs["additional"]["gps"]["speed"] == 5.2
     assert obs["additional"]["gps"]["course"] == 90
 
@@ -312,12 +317,9 @@ def test_classify_no_location():
     assert lon is None
 
 
-def test_classify_message_example():
+def test_classify_message_example(message_example):
     """docs/message-example.json shape (Doppler only, operation-mo-event) → LocationType.DOPPLER."""
-    example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "message-example.json")
-    with open(example_path) as f:
-        msg = json.load(f)
-    loc_type, lat, lon = classify_message_location(msg)
+    loc_type, lat, lon = classify_message_location(message_example)
     assert loc_type == LocationType.DOPPLER
     assert lat == -42.47563
     assert lon == 173.63476

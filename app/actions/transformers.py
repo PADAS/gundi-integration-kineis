@@ -170,7 +170,7 @@ def telemetry_to_observation(
         "location_confidence": location_confidence,
         "location_error_m": location_error_m,
     })
-    
+
     return {
         "source": source,
         "source_name": source_name,
@@ -178,6 +178,9 @@ def telemetry_to_observation(
         "subject_type": "unassigned",
         "recorded_at": recorded_at,
         "location": {"lat": lat_f, "lon": lon_f},
+        "location_type": location_type.value,
+        "location_confidence": location_confidence,
+        "location_error_m": location_error_m,
         "additional": additional or {},
     }
 
