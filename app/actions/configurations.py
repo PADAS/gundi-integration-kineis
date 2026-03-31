@@ -53,7 +53,7 @@ class PullTelemetryConfiguration(PullActionConfiguration):
     lookback_hours: int = FieldWithUIOptions(
         4,
         ge=1,
-        le=1392,
+        le=2160,
         title="Lookback hours",
         description="Hours to look back for telemetry (UTC time window)",
         ui_options=UIOptions(
