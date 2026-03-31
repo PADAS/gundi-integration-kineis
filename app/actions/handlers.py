@@ -6,7 +6,12 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict
 
-from app.actions.configurations import AuthenticateKineisConfig, PullTelemetryConfiguration, get_auth_config
+from app.actions.configurations import (
+    AuthenticateKineisConfig,
+    BackfillTelemetryConfiguration,
+    PullTelemetryConfiguration,
+    get_auth_config,
+)
 from app.actions.transformers import telemetry_batch_to_observations_detailed
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
@@ -197,6 +202,121 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             level=LogLevel.WARNING,
             data=summary_data,
         )
+
+    return {
+        "messages_fetched": len(messages),
+        "observations_sent": sent_total,
+        "skipped": skipped,
+    }
+
+
+@crontab_schedule("0 2 * * *")  # Daily at 02:00 UTC
+@activity_logger()
+async def action_backfill_telemetry(integration, action_config: BackfillTelemetryConfiguration):
+    """
+    Daily bulk backfill: re-fetch last N hours via bulk API to catch messages
+    whose Doppler locations were computed after the realtime checkpoint advanced.
+    EarthRanger deduplication handles overlap with realtime data.
+    Credentials come from the Auth action.
+    """
+    integration_id = str(integration.id)
+    action_id = "backfill_telemetry"
+    auth_config = get_auth_config(integration)
+    device_refs = action_config.device_refs or None
+    device_uids = action_config.device_uids or None
+
+    to_time = _utc_now()
+    from_time = to_time - timedelta(hours=action_config.lookback_hours)
+    from_str = _format_utc(from_time)
+    to_str = _format_utc(to_time)
+
+    await log_action_activity(
+        integration_id=integration_id,
+        action_id=action_id,
+        title="Backfill: fetching telemetry from Kineis bulk API",
+        level=LogLevel.INFO,
+        data={"from": from_str, "to": to_str, "lookback_hours": action_config.lookback_hours},
+    )
+
+    messages = await fetch_telemetry(
+        integration_id=integration_id,
+        username=auth_config.username,
+        password=auth_config.password.get_secret_value(),
+        from_datetime=from_str,
+        to_datetime=to_str,
+        page_size=action_config.page_size,
+        device_refs=device_refs,
+        device_uids=device_uids,
+        retrieve_metadata=action_config.retrieve_metadata,
+        retrieve_raw_data=action_config.retrieve_raw_data,
+        client_id=auth_config.client_id,
+    )
+
+    if not messages:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id=action_id,
+            title="Backfill: no telemetry messages found in window",
+            level=LogLevel.INFO,
+            data={"messages_fetched": 0, "from": from_str, "to": to_str},
+        )
+        return {"messages_fetched": 0, "observations_sent": 0, "skipped": 0}
+
+    device_uid_to_customer_name: Dict[int, str] = {}
+    try:
+        devices = await fetch_device_list(
+            integration_id=integration_id,
+            username=auth_config.username,
+            password=auth_config.password.get_secret_value(),
+            client_id=auth_config.client_id,
+        )
+        device_uid_to_customer_name = {
+            d["deviceUid"]: d["customerName"]
+            for d in devices
+            if d.get("customerName")
+        }
+    except Exception as e:
+        logger.warning("Backfill: could not fetch device list, using fallback: %s", e)
+
+    transform_result = telemetry_batch_to_observations_detailed(
+        messages,
+        device_uid_to_customer_name=device_uid_to_customer_name,
+    )
+    observations = transform_result.observations
+    skipped = transform_result.total_skipped
+
+    sent_total = 0
+    for batch in generate_batches(observations, OBSERVATION_BATCH_SIZE):
+        await send_observations_to_gundi(
+            observations=list(batch),
+            integration_id=integration.id,
+        )
+        sent_total += len(batch)
+
+    summary_data: Dict = {"messages_fetched": len(messages), "observations_sent": sent_total}
+    if transform_result.msg_types_seen:
+        summary_data["message_types"] = transform_result.msg_types_seen
+    if skipped:
+        summary_data["skipped"] = skipped
+        summary_data["skip_reasons"] = transform_result.skip_reasons
+
+    if sent_total > 0:
+        title = (
+            f"Backfill: sent {sent_total} observations to Gundi ({skipped} skipped)"
+            if skipped else f"Backfill: sent {sent_total} observations to Gundi"
+        )
+        level = LogLevel.INFO
+    else:
+        title = f"Backfill: no observations could be created from {len(messages)} messages"
+        level = LogLevel.WARNING
+
+    await log_action_activity(
+        integration_id=integration_id,
+        action_id=action_id,
+        title=title,
+        level=level,
+        data=summary_data,
+    )
 
     return {
         "messages_fetched": len(messages),

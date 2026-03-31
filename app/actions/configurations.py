@@ -53,7 +53,7 @@ class PullTelemetryConfiguration(PullActionConfiguration):
     lookback_hours: int = FieldWithUIOptions(
         4,
         ge=1,
-        le=168,
+        le=1392,
         title="Lookback hours",
         description="Hours to look back for telemetry (UTC time window)",
         ui_options=UIOptions(
@@ -115,6 +115,73 @@ class PullTelemetryConfiguration(PullActionConfiguration):
             "lookback_hours",
             "page_size",
             "use_realtime",
+            "device_refs",
+            "device_uids",
+            "retrieve_metadata",
+            "retrieve_raw_data",
+        ],
+    )
+
+
+class BackfillTelemetryConfiguration(PullActionConfiguration):
+    """
+    Daily bulk backfill config. Re-fetches the last N hours via the bulk API
+    to pick up messages whose Doppler locations were computed late.
+    Credentials come from the Auth action.
+    """
+
+    lookback_hours: int = FieldWithUIOptions(
+        24,
+        ge=1,
+        le=168,
+        title="Lookback hours",
+        description="Hours to look back. Default 24h; max 168h (7 days).",
+        ui_options=UIOptions(widget="range"),
+    )
+    page_size: int = FieldWithUIOptions(
+        100,
+        ge=1,
+        le=500,
+        title="Page size",
+        description="Bulk API pagination page size",
+        ui_options=UIOptions(widget="range"),
+    )
+    device_refs: Optional[List[str]] = FieldWithUIOptions(
+        default=None,
+        title="Device refs",
+        description="Optional list of device refs (string IDs) to filter",
+    )
+    device_uids: Optional[List[int]] = FieldWithUIOptions(
+        default=None,
+        title="Device UIDs",
+        description="Optional list of device UIDs (numeric) to filter",
+    )
+    retrieve_metadata: bool = pydantic.Field(
+        True,
+        title="Retrieve metadata",
+        description="Include metadata in bulk response",
+    )
+    retrieve_raw_data: bool = pydantic.Field(
+        True,
+        title="Retrieve raw data",
+        description="Include raw data in bulk response",
+    )
+
+    @root_validator
+    def device_filter_single(cls, values):
+        """API allows only one of deviceRefs or deviceUids (manual 1.3.1.2)."""
+        refs = values.get("device_refs") or []
+        uids = values.get("device_uids") or []
+        if refs and uids:
+            raise ValueError(
+                "Provide only one of device_refs or device_uids; the API does not accept both."
+            )
+        return values
+
+    ui_global_options = GlobalUISchemaOptions(
+        order=[
+            "lookback_hours",
+            "page_size",
             "device_refs",
             "device_uids",
             "retrieve_metadata",
