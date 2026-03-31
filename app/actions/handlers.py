@@ -185,6 +185,10 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
     if skipped:
         summary_data["skipped"] = skipped
         summary_data["skip_reasons"] = transform_result.skip_reasons
+    if transform_result.devices_with_location:
+        summary_data["devices_with_location"] = sorted(transform_result.devices_with_location)
+    if transform_result.devices_without_location:
+        summary_data["devices_without_location"] = sorted(transform_result.devices_without_location)
 
     if sent_total > 0:
         await log_action_activity(
@@ -202,6 +206,12 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             level=LogLevel.WARNING,
             data=summary_data,
         )
+    logger.info(
+        "pull_telemetry summary: messages=%d sent=%d skipped=%d devices_with_location=%s devices_without_location=%s",
+        len(messages), sent_total, skipped,
+        sorted(transform_result.devices_with_location),
+        sorted(transform_result.devices_without_location),
+    )
 
     return {
         "messages_fetched": len(messages),
@@ -299,6 +309,10 @@ async def action_backfill_telemetry(integration, action_config: BackfillTelemetr
     if skipped:
         summary_data["skipped"] = skipped
         summary_data["skip_reasons"] = transform_result.skip_reasons
+    if transform_result.devices_with_location:
+        summary_data["devices_with_location"] = sorted(transform_result.devices_with_location)
+    if transform_result.devices_without_location:
+        summary_data["devices_without_location"] = sorted(transform_result.devices_without_location)
 
     if sent_total > 0:
         title = (
@@ -316,6 +330,12 @@ async def action_backfill_telemetry(integration, action_config: BackfillTelemetr
         title=title,
         level=level,
         data=summary_data,
+    )
+    logger.info(
+        "backfill_telemetry summary: messages=%d sent=%d skipped=%d devices_with_location=%s devices_without_location=%s",
+        len(messages), sent_total, skipped,
+        sorted(transform_result.devices_with_location),
+        sorted(transform_result.devices_without_location),
     )
 
     return {
