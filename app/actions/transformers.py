@@ -290,6 +290,8 @@ class TransformResult:
         self.skip_reasons: Dict[str, int] = {}
         self.msg_types_seen: Dict[str, int] = {}
         self.location_types_seen: Dict[str, int] = {}
+        self.devices_with_location: set = set()
+        self.devices_without_location: set = set()
 
 
 def telemetry_batch_to_observations_detailed(
@@ -330,6 +332,7 @@ def telemetry_batch_to_observations_detailed(
             else:
                 reason = "no_location"
             result.skip_reasons[reason] = result.skip_reasons.get(reason, 0) + 1
+            result.devices_without_location.add(str(msg.get("deviceRef")))
             continue
 
         obs = telemetry_to_observation(msg, device_uid_to_customer_name=device_uid_to_customer_name)
@@ -337,6 +340,7 @@ def telemetry_batch_to_observations_detailed(
             result.observations.append(obs)
             loc_type = obs.get("location_type", "unknown")
             result.location_types_seen[loc_type] = result.location_types_seen.get(loc_type, 0) + 1
+            result.devices_with_location.add(str(msg.get("deviceRef")))
         else:
             # Unexpected skip (e.g. invalid float conversion)
             result.total_skipped += 1

@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pydantic
 
-from app.actions.configurations import AuthenticateKineisConfig, PullTelemetryConfiguration
-from app.actions.handlers import action_auth, action_pull_telemetry
+from app.actions.configurations import AuthenticateKineisConfig, BackfillTelemetryConfiguration, PullTelemetryConfiguration
+from app.actions.handlers import action_auth, action_backfill_telemetry, action_pull_telemetry
 
 
 @pytest.fixture
@@ -312,6 +312,122 @@ async def test_action_pull_telemetry_all_skipped_logs_warning(
     warning_calls = [
         call for call in mock_log.call_args_list
         if "No observations could be created" in str(call)
+    ]
+    assert len(warning_calls) == 1
+    log_data = warning_calls[0][1]["data"]
+    assert "skip_reasons" in log_data
+    assert log_data["skip_reasons"]["no_location"] == 2
+
+
+# --- action_backfill_telemetry tests ---
+
+@pytest.fixture
+def backfill_telemetry_config():
+    return BackfillTelemetryConfiguration(lookback_hours=24, page_size=100)
+
+
+@pytest.mark.asyncio
+async def test_action_backfill_telemetry_sends_observations(
+    mocker, integration_with_id, backfill_telemetry_config, authenticate_kineis_config
+):
+    """Backfill fetches via bulk API, maps Doppler observations, and sends to Gundi."""
+    sample_messages = [
+        {
+            "deviceRef": "D1",
+            "msgDatetime": "2024-01-15T10:00:00.000Z",
+            "dopplerLocLat": -1.5,
+            "dopplerLocLon": 30.2,
+            "dopplerDatetime": "2024-01-15T10:00:00.000Z",
+        },
+        {
+            "deviceRef": "D2",
+            "msgDatetime": "2024-01-15T11:00:00.000Z",
+            "dopplerLocLat": -1.6,
+            "dopplerLocLon": 30.3,
+            "dopplerDatetime": "2024-01-15T11:00:00.000Z",
+        },
+    ]
+    mock_fetch = AsyncMock(return_value=sample_messages)
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", mock_fetch)
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_backfill_telemetry(
+        integration=integration_with_id,
+        action_config=backfill_telemetry_config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 2
+    assert result["skipped"] == 0
+    call_kwargs = mock_fetch.call_args[1]
+    assert "from_datetime" in call_kwargs
+    assert "to_datetime" in call_kwargs
+    mock_send.assert_called_once()
+    observations = mock_send.call_args[1]["observations"]
+    assert len(observations) == 2
+    assert observations[0]["source"] == "D1"
+    assert observations[1]["source"] == "D2"
+
+
+@pytest.mark.asyncio
+async def test_action_backfill_telemetry_no_messages(
+    mocker, integration_with_id, backfill_telemetry_config, authenticate_kineis_config
+):
+    """When no messages returned, early-return without calling send or device list."""
+    mock_send = AsyncMock(return_value={})
+    mock_device_list = AsyncMock(return_value=[])
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.fetch_device_list", mock_device_list)
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_backfill_telemetry(
+        integration=integration_with_id,
+        action_config=backfill_telemetry_config,
+    )
+
+    assert result == {"messages_fetched": 0, "observations_sent": 0, "skipped": 0}
+    mock_send.assert_not_called()
+    mock_device_list.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_action_backfill_telemetry_all_skipped_logs_warning(
+    mocker, integration_with_id, backfill_telemetry_config, authenticate_kineis_config
+):
+    """When all messages have no location, log WARNING and return skipped count."""
+    sample_messages = [
+        {"deviceRef": "D1", "msgDatetime": "2024-01-15T10:00:00Z"},
+        {"deviceRef": "D2", "msgDatetime": "2024-01-15T11:00:00Z"},
+    ]
+    mock_send = AsyncMock(return_value={})
+    mock_log = AsyncMock()
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=sample_messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", mock_log)
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_backfill_telemetry(
+        integration=integration_with_id,
+        action_config=backfill_telemetry_config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 0
+    assert result["skipped"] == 2
+    mock_send.assert_not_called()
+    warning_calls = [
+        call for call in mock_log.call_args_list
+        if "no observations could be created" in str(call).lower()
     ]
     assert len(warning_calls) == 1
     log_data = warning_calls[0][1]["data"]
