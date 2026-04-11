@@ -13,6 +13,7 @@ from app.services.kineis_client import (
     retrieve_realtime_telemetry,
     retrieve_device_list,
     fetch_device_list,
+    INVALID_CHECKPOINT_RETRY_LOOKBACK_MS,
     fetch_telemetry,
     fetch_telemetry_realtime,
 )
@@ -246,7 +247,7 @@ async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_clamp
     assert new_checkpoint == 12345
     assert mock_post.call_count == 2
     assert mock_post.call_args_list[0][1]["json"]["fromCheckpoint"] == 999999
-    assert mock_post.call_args_list[1][1]["json"]["fromCheckpoint"] == frozen_now_ms - 21_000_000
+    assert mock_post.call_args_list[1][1]["json"]["fromCheckpoint"] == frozen_now_ms - INVALID_CHECKPOINT_RETRY_LOOKBACK_MS
 
 
 @pytest.mark.asyncio

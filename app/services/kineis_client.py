@@ -16,6 +16,11 @@ from app import settings
 
 logger = logging.getLogger(__name__)
 
+# The CLS realtime API rejects checkpoints older than 6 hours (21_600_000 ms).
+# When recovering from a stale checkpoint we retry with now minus this value,
+# staying 10 minutes inside the limit to avoid edge-case rejections.
+INVALID_CHECKPOINT_RETRY_LOOKBACK_MS = (5 * 3600 + 50 * 60) * 1000  # 5h50m in ms
+
 def _auth_path() -> str:
     return getattr(
         settings,
@@ -276,12 +281,12 @@ async def retrieve_realtime_telemetry(
                 err_data = response.json()
                 logger.warning("Kineis retrieve-realtime 400 error: %s", err_data)
                 if err_data.get("code") == "INVALID_CHECKPOINT":
-                    min_valid = int(time.time() * 1000) - 21_000_000  # 5h50m, safely within 6h window
+                    retry_checkpoint_ms = int(time.time() * 1000) - INVALID_CHECKPOINT_RETRY_LOOKBACK_MS
                     logger.warning(
                         "Kineis INVALID_CHECKPOINT (checkpoint=%d too old), clamping to %d",
-                        checkpoint, min_valid,
+                        checkpoint, retry_checkpoint_ms,
                     )
-                    body_retry = {**body, "fromCheckpoint": min_valid}
+                    body_retry = {**body, "fromCheckpoint": retry_checkpoint_ms}
                     response = await client.post(url, json=body_retry, headers=headers)
                     logger.info("Kineis retrieve-realtime retry response: status=%d", response.status_code)
             except (ValueError, TypeError):
