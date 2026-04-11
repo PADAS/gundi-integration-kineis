@@ -133,9 +133,9 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
     lookback_hours: int = FieldWithUIOptions(
         24,
         ge=1,
-        le=168,
+        le=96,
         title="Lookback hours",
-        description="Hours to look back. Default 24h; max 168h (7 days).",
+        description="Hours to look back. Default 24h; max 96h (4 days).",
         ui_options=UIOptions(widget="range"),
     )
     page_size: int = FieldWithUIOptions(

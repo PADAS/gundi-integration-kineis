@@ -275,9 +275,13 @@ async def retrieve_realtime_telemetry(
             try:
                 err_data = response.json()
                 logger.warning("Kineis retrieve-realtime 400 error: %s", err_data)
-                if err_data.get("code") == "INVALID_CHECKPOINT" and checkpoint != 0:
-                    logger.warning("Kineis INVALID_CHECKPOINT (checkpoint=%d), retrying with checkpoint=0", checkpoint)
-                    body_retry = {**body, "fromCheckpoint": 0}
+                if err_data.get("code") == "INVALID_CHECKPOINT":
+                    min_valid = int(time.time() * 1000) - 21_000_000  # 5h50m, safely within 6h window
+                    logger.warning(
+                        "Kineis INVALID_CHECKPOINT (checkpoint=%d too old), clamping to %d",
+                        checkpoint, min_valid,
+                    )
+                    body_retry = {**body, "fromCheckpoint": min_valid}
                     response = await client.post(url, json=body_retry, headers=headers)
                     logger.info("Kineis retrieve-realtime retry response: status=%d", response.status_code)
             except (ValueError, TypeError):
