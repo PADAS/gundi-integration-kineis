@@ -13,6 +13,7 @@ from app.services.kineis_client import (
     retrieve_realtime_telemetry,
     retrieve_device_list,
     fetch_device_list,
+    INVALID_CHECKPOINT_RETRY_LOOKBACK_MS,
     fetch_telemetry,
     fetch_telemetry_realtime,
 )
@@ -213,8 +214,8 @@ async def test_retrieve_realtime_telemetry_returns_messages_and_checkpoint(mocke
 
 
 @pytest.mark.asyncio
-async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_zero(mocker):
-    """When API returns 400 INVALID_CHECKPOINT, retry once with fromCheckpoint=0 and return result."""
+async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_clamped_value(mocker):
+    """When API returns 400 INVALID_CHECKPOINT, retry once with a valid timestamp (now - 5h50m)."""
     resp_400 = MagicMock()
     resp_400.status_code = 400
     resp_400.request = MagicMock()
@@ -234,6 +235,9 @@ async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_zero(
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mocker.patch("app.services.kineis_client.httpx.AsyncClient", return_value=mock_client)
 
+    frozen_now_ms = 1_000_000_000_000
+    mocker.patch("app.services.kineis_client.time.time", return_value=frozen_now_ms / 1000)
+
     messages, new_checkpoint = await retrieve_realtime_telemetry(
         access_token="token",
         checkpoint=999999,
@@ -243,7 +247,7 @@ async def test_retrieve_realtime_telemetry_invalid_checkpoint_retries_with_zero(
     assert new_checkpoint == 12345
     assert mock_post.call_count == 2
     assert mock_post.call_args_list[0][1]["json"]["fromCheckpoint"] == 999999
-    assert mock_post.call_args_list[1][1]["json"]["fromCheckpoint"] == 0
+    assert mock_post.call_args_list[1][1]["json"]["fromCheckpoint"] == frozen_now_ms - INVALID_CHECKPOINT_RETRY_LOOKBACK_MS
 
 
 @pytest.mark.asyncio
