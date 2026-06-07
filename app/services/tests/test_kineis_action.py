@@ -38,6 +38,20 @@ def test_pull_telemetry_config_rejects_both_device_refs_and_uids():
     assert "device_refs" in str(exc_info.value) or "device_uids" in str(exc_info.value)
 
 
+def test_pull_telemetry_config_doppler_settle_hours_default_and_bounds():
+    """doppler_settle_hours defaults to 6 and is bounded 0..48."""
+    cfg = PullTelemetryConfiguration(lookback_hours=4, page_size=100, use_realtime=False)
+    assert cfg.doppler_settle_hours == 6
+
+    with pytest.raises(pydantic.ValidationError):
+        PullTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=-1)
+    with pytest.raises(pydantic.ValidationError):
+        PullTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=49)
+
+    bf = BackfillTelemetryConfiguration(lookback_hours=24, page_size=100)
+    assert bf.doppler_settle_hours == 6
+
+
 @pytest.fixture
 def authenticate_kineis_config():
     return AuthenticateKineisConfig(

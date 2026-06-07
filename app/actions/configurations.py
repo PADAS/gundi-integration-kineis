@@ -98,6 +98,16 @@ class PullTelemetryConfiguration(PullActionConfiguration):
         title="Use realtime API",
         description="When enabled, use the realtime checkpoint API for scheduled pulls (only new data since last run). When disabled or on first run, use bulk API with lookback window.",
     )
+    doppler_settle_hours: int = FieldWithUIOptions(
+        6,
+        ge=0,
+        le=48,
+        title="Doppler settle hours",
+        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch).",
+        ui_options=UIOptions(
+            widget="range",  # slider
+        ),
+    )
 
     @root_validator
     def device_filter_single(cls, values):
@@ -115,6 +125,7 @@ class PullTelemetryConfiguration(PullActionConfiguration):
             "lookback_hours",
             "page_size",
             "use_realtime",
+            "doppler_settle_hours",
             "device_refs",
             "device_uids",
             "retrieve_metadata",
@@ -144,6 +155,14 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
         le=500,
         title="Page size",
         description="Bulk API pagination page size",
+        ui_options=UIOptions(widget="range"),
+    )
+    doppler_settle_hours: int = FieldWithUIOptions(
+        6,
+        ge=0,
+        le=48,
+        title="Doppler settle hours",
+        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch).",
         ui_options=UIOptions(widget="range"),
     )
     device_refs: Optional[List[str]] = FieldWithUIOptions(
@@ -182,6 +201,7 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
         order=[
             "lookback_hours",
             "page_size",
+            "doppler_settle_hours",
             "device_refs",
             "device_uids",
             "retrieve_metadata",
