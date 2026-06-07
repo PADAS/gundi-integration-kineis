@@ -104,3 +104,21 @@ def test_same_locid_different_devices_not_collapsed():
     kept, stats = collapse_doppler_revisions([a, b], SETTLE, NOW)
     assert len(kept) == 2
     assert stats["revisions_collapsed"] == 0
+
+
+def test_held_fix_is_emitted_once_past_settle_window_with_stable_recorded_at():
+    """A fix held on an early run is emitted unchanged once it is past the window."""
+    fix = _obs("45020", 77, 0, "2026-05-17T01:55:11.781", -46.73484, 168.30432)
+    recorded_at = fix["recorded_at"]
+
+    # Early run: fix is only ~1h old relative to 'now' -> held.
+    early_now = datetime(2026, 5, 17, 3, 0, 0, tzinfo=timezone.utc)
+    kept_early, stats_early = collapse_doppler_revisions([fix], SETTLE, early_now)
+    assert kept_early == []
+    assert stats_early["held_unsettled"] == 1
+
+    # Later run: same fix is now well past the window -> emitted, recorded_at unchanged.
+    kept_late, stats_late = collapse_doppler_revisions([fix], SETTLE, NOW)
+    assert len(kept_late) == 1
+    assert kept_late[0]["recorded_at"] == recorded_at
+    assert stats_late["held_unsettled"] == 0

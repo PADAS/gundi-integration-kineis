@@ -388,8 +388,11 @@ def collapse_doppler_revisions(
 
     Only observations with location_type == "doppler" are affected:
       1. Settle: drop (hold) any whose recorded_at is newer than now - settle_window.
-         Skipped when settle_window <= 0. Held observations are re-fetched and
-         emitted by a later run once past the window.
+         Skipped when settle_window <= 0. Held observations are re-emitted by a
+         later run once past the window — on the realtime path each message is
+         delivered only once, so re-emission relies on the daily backfill action
+         (which re-fetches by time window). With settle_window > 0, the
+         backfill_telemetry action must be enabled or held fixes are never sent.
       2. Collapse: group by (source, dopplerLocId) and keep only the highest
          dopplerRevision (tie-break: latest dopplerAcqDatetime, then last seen).
          Observations with no dopplerLocId each form their own group.

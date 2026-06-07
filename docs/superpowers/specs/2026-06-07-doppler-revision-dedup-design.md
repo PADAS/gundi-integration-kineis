@@ -81,6 +81,13 @@ Add `doppler_settle_hours` to both `PullTelemetryConfiguration` and
 - Range: 0–48. `0` disables the settle filter but keeps in-batch collapse.
 - Surfaced in the portal UI (range widget), consistent with existing fields.
 
+**Operational dependency:** with `doppler_settle_hours > 0`, the
+`backfill_telemetry` action must be enabled. The realtime API delivers each
+message once (advancing checkpoint), so a fix held by the settle filter is
+re-emitted only by the daily backfill, which re-fetches by time window. A
+realtime-only deployment with a non-zero settle window would never send held
+Doppler fixes.
+
 ### Handler wiring
 
 In both `action_pull_telemetry` and `action_backfill_telemetry`, after building
