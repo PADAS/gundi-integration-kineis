@@ -487,3 +487,43 @@ async def test_action_pull_telemetry_collapses_doppler_revisions(
     assert len(sent) == 1
     assert sent[0]["additional"]["dopplerRevision"] == 2
     assert sent[0]["location"]["lat"] == -46.68636
+
+
+@pytest.mark.asyncio
+async def test_action_backfill_telemetry_collapses_doppler_revisions(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """Backfill collapses two revisions of one dopplerLocId to the highest revision."""
+    config = BackfillTelemetryConfiguration(
+        lookback_hours=24, page_size=100, doppler_settle_hours=0,
+    )
+    messages = [
+        {
+            "deviceRef": "45020", "dopplerLocId": 12, "dopplerRevision": 1,
+            "dopplerDatetime": "2026-05-17T01:53:40.901",
+            "dopplerLocLat": -46.6201, "dopplerLocLon": 168.34167, "dopplerLocClass": "B",
+        },
+        {
+            "deviceRef": "45020", "dopplerLocId": 12, "dopplerRevision": 2,
+            "dopplerDatetime": "2026-05-17T01:55:11.781",
+            "dopplerLocLat": -46.73484, "dopplerLocLon": 168.30432, "dopplerLocClass": "2",
+        },
+    ]
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_backfill_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert len(sent) == 1
+    assert sent[0]["additional"]["dopplerRevision"] == 2
+    assert sent[0]["location"]["lat"] == -46.73484
