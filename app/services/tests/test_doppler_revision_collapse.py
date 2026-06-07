@@ -95,3 +95,12 @@ def test_missing_locid_never_collapses():
     kept, stats = collapse_doppler_revisions([a, b], SETTLE, NOW)
     assert len(kept) == 2
     assert stats["revisions_collapsed"] == 0
+
+
+def test_same_locid_different_devices_not_collapsed():
+    """Two devices sharing a dopplerLocId must not be collapsed into one."""
+    a = _obs("45020", 11, 2, "2026-05-17T01:00:00", -46.6, 168.3)
+    b = _obs("45021", 11, 0, "2026-05-17T01:00:00", -46.7, 168.4)
+    kept, stats = collapse_doppler_revisions([a, b], SETTLE, NOW)
+    assert len(kept) == 2
+    assert stats["revisions_collapsed"] == 0

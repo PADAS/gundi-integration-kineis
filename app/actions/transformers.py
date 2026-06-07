@@ -398,6 +398,7 @@ def collapse_doppler_revisions(
 
     Returns (kept_observations, stats) where stats has integer keys
     "held_unsettled" and "revisions_collapsed".
+    now must be a timezone-aware UTC datetime.
     """
     passthrough: List[Dict[str, Any]] = []
     doppler: List[Dict[str, Any]] = []
@@ -405,7 +406,8 @@ def collapse_doppler_revisions(
         (doppler if obs.get("location_type") == "doppler" else passthrough).append(obs)
 
     held = 0
-    if settle_window and settle_window > timedelta(0):
+    if settle_window > timedelta(0):
+        assert now.tzinfo is not None, "now must be timezone-aware (e.g. datetime.now(timezone.utc))"
         cutoff = now - settle_window
         settled: List[Dict[str, Any]] = []
         for obs in doppler:
