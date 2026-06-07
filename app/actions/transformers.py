@@ -6,7 +6,7 @@ Goal: read GPS fixes (gpsLocLat/Lon, gpsLocDatetime), transform, and send as obs
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -347,3 +347,91 @@ def telemetry_batch_to_observations_detailed(
             result.skip_reasons["other"] = result.skip_reasons.get("other", 0) + 1
 
     return result
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string (optionally trailing 'Z') to an aware UTC datetime."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _revision_sort_key(obs: Dict[str, Any], idx: int) -> Tuple[int, float, int]:
+    """Sort key for picking the winning revision: highest revision, then latest
+    acquisition time, then last seen (idx) for determinism."""
+    add = obs.get("additional") or {}
+    try:
+        revision = int(add.get("dopplerRevision"))
+    except (TypeError, ValueError):
+        revision = -1
+    acq = _parse_iso_utc(add.get("dopplerAcqDatetime")) or _parse_iso_utc(obs.get("recorded_at"))
+    acq_ts = acq.timestamp() if acq else float("-inf")
+    return (revision, acq_ts, idx)
+
+
+def collapse_doppler_revisions(
+    observations: List[Dict[str, Any]],
+    settle_window: timedelta,
+    now: datetime,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """
+    Collapse CLS Doppler location revisions to one observation per fix.
+
+    Only observations with location_type == "doppler" are affected:
+      1. Settle: drop (hold) any whose recorded_at is newer than now - settle_window.
+         Skipped when settle_window <= 0. Held observations are re-fetched and
+         emitted by a later run once past the window.
+      2. Collapse: group by (source, dopplerLocId) and keep only the highest
+         dopplerRevision (tie-break: latest dopplerAcqDatetime, then last seen).
+         Observations with no dopplerLocId each form their own group.
+
+    Non-doppler observations pass through untouched.
+
+    Returns (kept_observations, stats) where stats has integer keys
+    "held_unsettled" and "revisions_collapsed".
+    """
+    passthrough: List[Dict[str, Any]] = []
+    doppler: List[Dict[str, Any]] = []
+    for obs in observations:
+        (doppler if obs.get("location_type") == "doppler" else passthrough).append(obs)
+
+    held = 0
+    if settle_window and settle_window > timedelta(0):
+        cutoff = now - settle_window
+        settled: List[Dict[str, Any]] = []
+        for obs in doppler:
+            recorded = _parse_iso_utc(obs.get("recorded_at"))
+            if recorded is not None and recorded > cutoff:
+                held += 1
+            else:
+                settled.append(obs)
+        doppler = settled
+
+    groups: Dict[Any, List[Tuple[int, Dict[str, Any]]]] = {}
+    order: List[Any] = []
+    for idx, obs in enumerate(doppler):
+        loc_id = (obs.get("additional") or {}).get("dopplerLocId")
+        key = ("__no_locid__", idx) if loc_id is None else (obs.get("source"), loc_id)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((idx, obs))
+
+    collapsed = 0
+    kept_doppler: List[Dict[str, Any]] = []
+    for key in order:
+        members = groups[key]
+        best = max(members, key=lambda m: _revision_sort_key(m[1], m[0]))
+        kept_doppler.append(best[1])
+        collapsed += len(members) - 1
+
+    return passthrough + kept_doppler, {"held_unsettled": held, "revisions_collapsed": collapsed}
