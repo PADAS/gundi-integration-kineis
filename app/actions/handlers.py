@@ -12,7 +12,10 @@ from app.actions.configurations import (
     PullTelemetryConfiguration,
     get_auth_config,
 )
-from app.actions.transformers import telemetry_batch_to_observations_detailed
+from app.actions.transformers import (
+    collapse_doppler_revisions,
+    telemetry_batch_to_observations_detailed,
+)
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_observations_to_gundi
@@ -164,7 +167,11 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
         messages,
         device_uid_to_customer_name=device_uid_to_customer_name,
     )
-    observations = transform_result.observations
+    observations, dedup_stats = collapse_doppler_revisions(
+        transform_result.observations,
+        settle_window=timedelta(hours=action_config.doppler_settle_hours),
+        now=_utc_now(),
+    )
     skipped = transform_result.total_skipped
 
     sent_total = 0
@@ -185,6 +192,10 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
     if skipped:
         summary_data["skipped"] = skipped
         summary_data["skip_reasons"] = transform_result.skip_reasons
+    if dedup_stats["revisions_collapsed"]:
+        summary_data["doppler_revisions_collapsed"] = dedup_stats["revisions_collapsed"]
+    if dedup_stats["held_unsettled"]:
+        summary_data["doppler_held_unsettled"] = dedup_stats["held_unsettled"]
     if transform_result.devices_with_location:
         summary_data["devices_with_location"] = sorted(transform_result.devices_with_location)
     if transform_result.devices_without_location:
@@ -292,7 +303,11 @@ async def action_backfill_telemetry(integration, action_config: BackfillTelemetr
         messages,
         device_uid_to_customer_name=device_uid_to_customer_name,
     )
-    observations = transform_result.observations
+    observations, dedup_stats = collapse_doppler_revisions(
+        transform_result.observations,
+        settle_window=timedelta(hours=action_config.doppler_settle_hours),
+        now=_utc_now(),
+    )
     skipped = transform_result.total_skipped
 
     sent_total = 0
@@ -309,6 +324,10 @@ async def action_backfill_telemetry(integration, action_config: BackfillTelemetr
     if skipped:
         summary_data["skipped"] = skipped
         summary_data["skip_reasons"] = transform_result.skip_reasons
+    if dedup_stats["revisions_collapsed"]:
+        summary_data["doppler_revisions_collapsed"] = dedup_stats["revisions_collapsed"]
+    if dedup_stats["held_unsettled"]:
+        summary_data["doppler_held_unsettled"] = dedup_stats["held_unsettled"]
     if transform_result.devices_with_location:
         summary_data["devices_with_location"] = sorted(transform_result.devices_with_location)
     if transform_result.devices_without_location:

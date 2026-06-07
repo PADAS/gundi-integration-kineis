@@ -447,3 +447,43 @@ async def test_action_backfill_telemetry_all_skipped_logs_warning(
     log_data = warning_calls[0][1]["data"]
     assert "skip_reasons" in log_data
     assert log_data["skip_reasons"]["no_location"] == 2
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_collapses_doppler_revisions(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """Two revisions of one dopplerLocId collapse to a single observation (highest revision)."""
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=False, doppler_settle_hours=0,
+    )
+    messages = [
+        {
+            "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 0,
+            "dopplerDatetime": "2026-05-17T01:28:53.197",
+            "dopplerLocLat": -46.60373, "dopplerLocLon": 168.33551, "dopplerLocClass": "B",
+        },
+        {
+            "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 2,
+            "dopplerDatetime": "2026-05-17T01:31:09.327",
+            "dopplerLocLat": -46.68636, "dopplerLocLon": 168.31857, "dopplerLocClass": "2",
+        },
+    ]
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert len(sent) == 1
+    assert sent[0]["additional"]["dopplerRevision"] == 2
+    assert sent[0]["location"]["lat"] == -46.68636
