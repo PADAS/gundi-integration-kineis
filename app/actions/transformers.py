@@ -448,3 +448,82 @@ def collapse_doppler_revisions(
     ]
 
     return kept, {"held_unsettled": held_fixes, "revisions_collapsed": collapsed}
+
+
+def reconcile_doppler_buffer(
+    buffer: Dict[str, Dict[str, Any]],
+    observations: List[Dict[str, Any]],
+    settle_window: timedelta,
+    now: datetime,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, int]]:
+    """
+    Merge new observations into a persistent held-fix buffer and emit settled fixes.
+
+    Used by the realtime pull path so Doppler fixes are re-emitted once they settle
+    rather than only by the daily backfill.
+
+    - buffer: {"<source>|<dopplerLocId>": observation} held from previous runs.
+    - Non-doppler observations are emitted immediately, never buffered.
+    - Doppler observations with a dopplerLocId are upserted into the buffer by
+      (source, dopplerLocId), keeping the higher dopplerRevision (tie-break: latest
+      dopplerAcqDatetime, then last seen). A discarded lower revision counts as a
+      collapsed revision.
+    - Doppler observations with no dopplerLocId cannot be re-identified across runs:
+      emitted if already settled, otherwise dropped (the daily backfill catches them).
+    - A buffered fix is emitted and evicted once its kept recorded_at <= now - settle_window.
+    - settle_window <= 0 disables holding: every fix is emitted (collapsed to max revision),
+      buffer ends empty.
+
+    Returns (emit, new_buffer, stats) where stats has integer keys
+    "buffered", "emitted_from_buffer", "revisions_collapsed".
+    now must be a timezone-aware UTC datetime when settle_window > 0.
+    """
+    cutoff: Optional[datetime] = None
+    if settle_window > timedelta(0):
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware (e.g. datetime.now(timezone.utc))")
+        cutoff = now - settle_window
+
+    def is_settled(obs: Dict[str, Any]) -> bool:
+        if cutoff is None:
+            return True
+        recorded = _parse_iso_utc(obs.get("recorded_at"))
+        return recorded is None or recorded <= cutoff
+
+    emit: List[Dict[str, Any]] = []
+    working: Dict[str, Dict[str, Any]] = dict(buffer)
+    collapsed = 0
+
+    for obs in observations:
+        if obs.get("location_type") != "doppler":
+            emit.append(obs)
+            continue
+        loc_id = (obs.get("additional") or {}).get("dopplerLocId")
+        if loc_id is None:
+            if is_settled(obs):
+                emit.append(obs)
+            # else: cannot buffer without a stable key; backfill will re-emit it
+            continue
+        key = f"{obs.get('source')}|{loc_id}"
+        existing = working.get(key)
+        if existing is None:
+            working[key] = obs
+        else:
+            best = max((existing, obs), key=lambda o: _revision_sort_key(o, 0))
+            working[key] = best
+            collapsed += 1
+
+    new_buffer: Dict[str, Dict[str, Any]] = {}
+    emitted_from_buffer = 0
+    for key, obs in working.items():
+        if is_settled(obs):
+            emit.append(obs)
+            emitted_from_buffer += 1
+        else:
+            new_buffer[key] = obs
+
+    return emit, new_buffer, {
+        "buffered": len(new_buffer),
+        "emitted_from_buffer": emitted_from_buffer,
+        "revisions_collapsed": collapsed,
+    }
