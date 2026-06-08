@@ -103,7 +103,7 @@ class PullTelemetryConfiguration(PullActionConfiguration):
         ge=0,
         le=48,
         title="Doppler settle hours",
-        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch).",
+        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch). Held fixes are intentionally suppressed until older than this window and emitted by a later run; on realtime pulls re-emission relies on the daily backfill action, so enable backfill_telemetry when this is > 0 or held fixes are never sent. The doppler_held_unsettled stat counts currently-held fixes and is expected, not a failure.",
         ui_options=UIOptions(
             widget="range",  # slider
         ),
@@ -162,7 +162,7 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
         ge=0,
         le=48,
         title="Doppler settle hours",
-        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch).",
+        description="Hold Doppler locations until they are at least this many hours old, so CLS revisions finalize before sending. 0 disables holding (collapse still applies within a batch). Held fixes are intentionally suppressed until older than this window and emitted by a later run; on realtime pulls re-emission relies on the daily backfill action, so enable backfill_telemetry when this is > 0 or held fixes are never sent. The doppler_held_unsettled stat counts currently-held fixes and is expected, not a failure.",
         ui_options=UIOptions(widget="range"),
     )
     device_refs: Optional[List[str]] = FieldWithUIOptions(

@@ -527,3 +527,48 @@ async def test_action_backfill_telemetry_collapses_doppler_revisions(
     assert len(sent) == 1
     assert sent[0]["additional"]["dopplerRevision"] == 2
     assert sent[0]["location"]["lat"] == -46.73484
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_held_fixes_log_info_not_warning(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """When all Doppler fixes are held by the settle window, log INFO (not WARNING)."""
+    from datetime import datetime, timezone
+    from gundi_core.events import LogLevel
+
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=False, doppler_settle_hours=6,
+    )
+    # Fix is ~5 min before the patched 'now' -> within the 6h window -> held.
+    messages = [{
+        "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 0,
+        "dopplerDatetime": "2026-05-17T01:55:00.000",
+        "dopplerLocLat": -46.7, "dopplerLocLon": 168.3, "dopplerLocClass": "2",
+    }]
+    mock_send = AsyncMock(return_value={})
+    mock_log = AsyncMock()
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", mock_log)
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+    mocker.patch(
+        "app.actions.handlers._utc_now",
+        return_value=datetime(2026, 5, 17, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["observations_sent"] == 0
+    mock_send.assert_not_called()
+    held_calls = [
+        c for c in mock_log.call_args_list
+        if "held pending settle window" in (c.kwargs.get("title") or "")
+    ]
+    assert held_calls, "expected a 'held pending settle window' summary log"
+    assert held_calls[0].kwargs["level"] == LogLevel.INFO
+    assert all(c.kwargs.get("level") != LogLevel.WARNING for c in mock_log.call_args_list)

@@ -397,47 +397,54 @@ def collapse_doppler_revisions(
          dopplerRevision (tie-break: latest dopplerAcqDatetime, then last seen).
          Observations with no dopplerLocId each form their own group.
 
-    Non-doppler observations pass through untouched.
+    Non-doppler observations pass through untouched. The output preserves the
+    original input ordering of all kept observations.
 
     Returns (kept_observations, stats) where stats has integer keys
     "held_unsettled" and "revisions_collapsed".
     now must be a timezone-aware UTC datetime.
     """
-    passthrough: List[Dict[str, Any]] = []
-    doppler: List[Dict[str, Any]] = []
-    for obs in observations:
-        (doppler if obs.get("location_type") == "doppler" else passthrough).append(obs)
-
-    held = 0
+    cutoff: Optional[datetime] = None
     if settle_window > timedelta(0):
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware (e.g. datetime.now(timezone.utc))")
         cutoff = now - settle_window
-        settled: List[Dict[str, Any]] = []
-        for obs in doppler:
+
+    # Settle step: find Doppler observations (by original index) that survive the
+    # hold window. Non-doppler observations are never held.
+    held = 0
+    surviving_doppler_idx: List[int] = []
+    for idx, obs in enumerate(observations):
+        if obs.get("location_type") != "doppler":
+            continue
+        if cutoff is not None:
             recorded = _parse_iso_utc(obs.get("recorded_at"))
             if recorded is not None and recorded > cutoff:
                 held += 1
-            else:
-                settled.append(obs)
-        doppler = settled
+                continue
+        surviving_doppler_idx.append(idx)
 
-    groups: Dict[Any, List[Tuple[int, Dict[str, Any]]]] = {}
-    order: List[Any] = []
-    for idx, obs in enumerate(doppler):
+    # Collapse step: group survivors by (source, dopplerLocId) and pick the
+    # winning revision per group. Track winners by original index.
+    groups: Dict[Any, List[int]] = {}
+    for idx in surviving_doppler_idx:
+        obs = observations[idx]
         loc_id = (obs.get("additional") or {}).get("dopplerLocId")
         key = ("__no_locid__", idx) if loc_id is None else (obs.get("source"), loc_id)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append((idx, obs))
+        groups.setdefault(key, []).append(idx)
 
+    winners: set = set()
     collapsed = 0
-    kept_doppler: List[Dict[str, Any]] = []
-    for key in order:
-        members = groups[key]
-        best = max(members, key=lambda m: _revision_sort_key(m[1], m[0]))
-        kept_doppler.append(best[1])
-        collapsed += len(members) - 1
+    for idxs in groups.values():
+        best_idx = max(idxs, key=lambda i: _revision_sort_key(observations[i], i))
+        winners.add(best_idx)
+        collapsed += len(idxs) - 1
 
-    return passthrough + kept_doppler, {"held_unsettled": held, "revisions_collapsed": collapsed}
+    # Rebuild in original order: keep every non-doppler observation and the
+    # winning revision of each Doppler group; drop held and superseded revisions.
+    kept: List[Dict[str, Any]] = [
+        obs for idx, obs in enumerate(observations)
+        if obs.get("location_type") != "doppler" or idx in winners
+    ]
+
+    return kept, {"held_unsettled": held, "revisions_collapsed": collapsed}

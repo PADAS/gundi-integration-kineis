@@ -209,6 +209,14 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             level=LogLevel.INFO,
             data=summary_data,
         )
+    elif dedup_stats["held_unsettled"]:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id=action_id,
+            title=f"No observations sent; {dedup_stats['held_unsettled']} Doppler fix(es) held pending settle window",
+            level=LogLevel.INFO,
+            data=summary_data,
+        )
     else:
         await log_action_activity(
             integration_id=integration_id,
@@ -338,6 +346,9 @@ async def action_backfill_telemetry(integration, action_config: BackfillTelemetr
             f"Backfill: sent {sent_total} observations to Gundi ({skipped} skipped)"
             if skipped else f"Backfill: sent {sent_total} observations to Gundi"
         )
+        level = LogLevel.INFO
+    elif dedup_stats["held_unsettled"]:
+        title = f"Backfill: no observations sent; {dedup_stats['held_unsettled']} Doppler fix(es) held pending settle window"
         level = LogLevel.INFO
     else:
         title = f"Backfill: no observations could be created from {len(messages)} messages"

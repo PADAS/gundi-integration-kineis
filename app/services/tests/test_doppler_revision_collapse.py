@@ -141,3 +141,24 @@ def test_naive_now_allowed_when_settle_window_disabled():
     kept, stats = collapse_doppler_revisions([fix], timedelta(0), naive_now)
     assert len(kept) == 1
     assert stats["held_unsettled"] == 0
+
+
+def test_preserves_input_order():
+    """Output keeps original ordering; the winning revision stays in its position."""
+    g1 = telemetry_to_observation({
+        "deviceRef": "D1", "gpsLocDatetime": "2026-05-17T01:00:00.000Z",
+        "gpsLocLat": -46.5, "gpsLocLon": 168.0,
+    })
+    d_old = _obs("45020", 11, 0, "2026-05-17T01:28:53.197", -46.60373, 168.33551, cls="B")
+    d_new = _obs("45020", 11, 2, "2026-05-17T01:31:09.327", -46.68636, 168.31857, cls="2")
+    g2 = telemetry_to_observation({
+        "deviceRef": "D2", "gpsLocDatetime": "2026-05-17T02:00:00.000Z",
+        "gpsLocLat": -46.7, "gpsLocLon": 168.1,
+    })
+    assert g1["location_type"] == "gps" and g2["location_type"] == "gps"
+
+    kept, stats = collapse_doppler_revisions([g1, d_old, d_new, g2], SETTLE, NOW)
+
+    # rev0 collapses into rev2; GPS observations keep their relative positions.
+    assert kept == [g1, d_new, g2]
+    assert stats["revisions_collapsed"] == 1
