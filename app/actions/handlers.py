@@ -134,6 +134,7 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
         log_data = {"messages_fetched": 0}
         if use_realtime:
             log_data["checkpoint_from"] = checkpoint
+            # new_checkpoint is always assigned here: use_realtime is True only after fetch_telemetry_realtime ran
             log_data["checkpoint_to"] = new_checkpoint
             try:
                 state_mgr = IntegrationStateManager()
@@ -240,7 +241,7 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
         await log_action_activity(
             integration_id=integration_id,
             action_id=action_id,
-            title=f"No observations sent; {held} Doppler fix(es) held pending settle window",
+            title=f"No observations sent; {held} Doppler fix(es) awaiting settle window",
             level=LogLevel.INFO,
             data=summary_data,
         )
