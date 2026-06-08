@@ -186,6 +186,8 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             doppler_summary["doppler_emitted_from_buffer"] = buf_stats["emitted_from_buffer"]
         if buf_stats["buffered"]:
             doppler_summary["doppler_buffered"] = buf_stats["buffered"]
+        # Persist checkpoint+buffer before sending: like the original checkpoint advance,
+        # a send failure after this point is intentionally backstopped by the daily backfill.
         try:
             state_mgr = IntegrationStateManager()
             await state_mgr.set_state(
