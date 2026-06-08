@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-07
 **Ticket:** ERCS-7275
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented
 
 ## Problem
 
