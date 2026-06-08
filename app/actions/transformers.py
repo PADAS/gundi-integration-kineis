@@ -466,8 +466,9 @@ def reconcile_doppler_buffer(
     - Non-doppler observations are emitted immediately, never buffered.
     - Doppler observations with a dopplerLocId are upserted into the buffer by
       (source, dopplerLocId), keeping the higher dopplerRevision (tie-break: latest
-      dopplerAcqDatetime, then last seen). A discarded lower revision counts as a
-      collapsed revision.
+      dopplerAcqDatetime, then the already-buffered entry — so a same-revision re-send
+      is idempotent). Each displaced entry (including same-revision re-sends) counts as
+      a collapsed revision.
     - Doppler observations with no dopplerLocId cannot be re-identified across runs:
       emitted if already settled, otherwise dropped (the daily backfill catches them).
     - A buffered fix is emitted and evicted once its kept recorded_at <= now - settle_window.
@@ -476,6 +477,8 @@ def reconcile_doppler_buffer(
 
     Returns (emit, new_buffer, stats) where stats has integer keys
     "buffered", "emitted_from_buffer", "revisions_collapsed".
+    "emitted_from_buffer" counts all Doppler fixes released this run, including any that
+    were already settled on arrival (not only ones held from a previous run).
     now must be a timezone-aware UTC datetime when settle_window > 0.
     """
     cutoff: Optional[datetime] = None

@@ -112,3 +112,16 @@ def test_naive_now_raises_when_settle_active():
     obs = _obs("45020", 11, 0, recent, -46.6, 168.3)
     with pytest.raises(ValueError):
         reconcile_doppler_buffer({}, [obs], SETTLE, datetime(2026, 5, 18, 0, 0, 0))  # naive
+
+
+def test_lower_revision_does_not_replace_buffered_fix():
+    """A later, lower-revision re-send must not overwrite the higher buffered revision."""
+    recent2 = (NOW - timedelta(minutes=58)).isoformat().replace("+00:00", "")
+    recent0 = (NOW - timedelta(hours=1)).isoformat().replace("+00:00", "")
+    rev2 = _obs("45020", 11, 2, recent2, -46.68, 168.31, cls="2")
+    rev0 = _obs("45020", 11, 0, recent0, -46.60, 168.33, cls="B")
+    buffer = {_key("45020", 11): rev2}
+    emit, new_buffer, stats = reconcile_doppler_buffer(buffer, [rev0], SETTLE, NOW)
+    assert emit == []
+    assert new_buffer[_key("45020", 11)]["additional"]["dopplerRevision"] == 2
+    assert stats["revisions_collapsed"] == 1
