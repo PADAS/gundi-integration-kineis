@@ -410,7 +410,8 @@ def collapse_doppler_revisions(
 
     held = 0
     if settle_window > timedelta(0):
-        assert now.tzinfo is not None, "now must be timezone-aware (e.g. datetime.now(timezone.utc))"
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware (e.g. datetime.now(timezone.utc))")
         cutoff = now - settle_window
         settled: List[Dict[str, Any]] = []
         for obs in doppler:

@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.actions.transformers import (
     collapse_doppler_revisions,
     telemetry_to_observation,
@@ -122,3 +124,20 @@ def test_held_fix_is_emitted_once_past_settle_window_with_stable_recorded_at():
     assert len(kept_late) == 1
     assert kept_late[0]["recorded_at"] == recorded_at
     assert stats_late["held_unsettled"] == 0
+
+
+def test_naive_now_raises_when_settle_window_active():
+    """A timezone-naive `now` must raise a clear error (not AssertionError) when settling."""
+    fix = _obs("45020", 77, 0, "2026-05-17T01:55:11.781", -46.73484, 168.30432)
+    naive_now = datetime(2026, 5, 18, 0, 0, 0)  # no tzinfo
+    with pytest.raises(ValueError):
+        collapse_doppler_revisions([fix], SETTLE, naive_now)
+
+
+def test_naive_now_allowed_when_settle_window_disabled():
+    """With settle disabled (0), `now` is never used, so a naive value is fine."""
+    fix = _obs("45020", 77, 0, "2026-05-17T01:55:11.781", -46.73484, 168.30432)
+    naive_now = datetime(2026, 5, 18, 0, 0, 0)  # no tzinfo
+    kept, stats = collapse_doppler_revisions([fix], timedelta(0), naive_now)
+    assert len(kept) == 1
+    assert stats["held_unsettled"] == 0
