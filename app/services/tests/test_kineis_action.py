@@ -38,6 +38,33 @@ def test_pull_telemetry_config_rejects_both_device_refs_and_uids():
     assert "device_refs" in str(exc_info.value) or "device_uids" in str(exc_info.value)
 
 
+def test_pull_telemetry_config_doppler_settle_hours_default_and_bounds():
+    """doppler_settle_hours defaults to 6 and is bounded 0..48."""
+    cfg = PullTelemetryConfiguration(lookback_hours=4, page_size=100, use_realtime=False)
+    assert cfg.doppler_settle_hours == 6
+
+    with pytest.raises(pydantic.ValidationError):
+        PullTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=-1)
+    with pytest.raises(pydantic.ValidationError):
+        PullTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=49)
+
+    bf = BackfillTelemetryConfiguration(lookback_hours=48, page_size=100)
+    assert bf.doppler_settle_hours == 6
+
+
+def test_backfill_config_requires_lookback_to_cover_settle_window():
+    """Backfill lookback_hours must be >= 24 + doppler_settle_hours when settling."""
+    # Too small: 24h lookback with a 6h settle window would drop held fixes.
+    with pytest.raises(pydantic.ValidationError):
+        BackfillTelemetryConfiguration(lookback_hours=24, page_size=100, doppler_settle_hours=6)
+    # Exactly 24 + settle is allowed.
+    ok = BackfillTelemetryConfiguration(lookback_hours=30, page_size=100, doppler_settle_hours=6)
+    assert ok.lookback_hours == 30
+    # Settling disabled: the lookback constraint does not apply.
+    disabled = BackfillTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=0)
+    assert disabled.doppler_settle_hours == 0
+
+
 @pytest.fixture
 def authenticate_kineis_config():
     return AuthenticateKineisConfig(
@@ -323,7 +350,9 @@ async def test_action_pull_telemetry_all_skipped_logs_warning(
 
 @pytest.fixture
 def backfill_telemetry_config():
-    return BackfillTelemetryConfiguration(lookback_hours=24, page_size=100)
+    # Settling disabled here so the pre-existing backfill tests (which assert all
+    # observations are sent) are unaffected; settling has its own dedicated tests.
+    return BackfillTelemetryConfiguration(lookback_hours=24, page_size=100, doppler_settle_hours=0)
 
 
 @pytest.mark.asyncio
@@ -433,3 +462,128 @@ async def test_action_backfill_telemetry_all_skipped_logs_warning(
     log_data = warning_calls[0][1]["data"]
     assert "skip_reasons" in log_data
     assert log_data["skip_reasons"]["no_location"] == 2
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_collapses_doppler_revisions(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """Two revisions of one dopplerLocId collapse to a single observation (highest revision)."""
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=False, doppler_settle_hours=0,
+    )
+    messages = [
+        {
+            "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 0,
+            "dopplerDatetime": "2026-05-17T01:28:53.197",
+            "dopplerLocLat": -46.60373, "dopplerLocLon": 168.33551, "dopplerLocClass": "B",
+        },
+        {
+            "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 2,
+            "dopplerDatetime": "2026-05-17T01:31:09.327",
+            "dopplerLocLat": -46.68636, "dopplerLocLon": 168.31857, "dopplerLocClass": "2",
+        },
+    ]
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert len(sent) == 1
+    assert sent[0]["additional"]["dopplerRevision"] == 2
+    assert sent[0]["location"]["lat"] == -46.68636
+
+
+@pytest.mark.asyncio
+async def test_action_backfill_telemetry_collapses_doppler_revisions(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """Backfill collapses two revisions of one dopplerLocId to the highest revision."""
+    config = BackfillTelemetryConfiguration(
+        lookback_hours=24, page_size=100, doppler_settle_hours=0,
+    )
+    messages = [
+        {
+            "deviceRef": "45020", "dopplerLocId": 12, "dopplerRevision": 1,
+            "dopplerDatetime": "2026-05-17T01:53:40.901",
+            "dopplerLocLat": -46.6201, "dopplerLocLon": 168.34167, "dopplerLocClass": "B",
+        },
+        {
+            "deviceRef": "45020", "dopplerLocId": 12, "dopplerRevision": 2,
+            "dopplerDatetime": "2026-05-17T01:55:11.781",
+            "dopplerLocLat": -46.73484, "dopplerLocLon": 168.30432, "dopplerLocClass": "2",
+        },
+    ]
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    result = await action_backfill_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["messages_fetched"] == 2
+    assert result["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert len(sent) == 1
+    assert sent[0]["additional"]["dopplerRevision"] == 2
+    assert sent[0]["location"]["lat"] == -46.73484
+
+
+@pytest.mark.asyncio
+async def test_action_pull_telemetry_held_fixes_log_info_not_warning(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """When all Doppler fixes are held by the settle window, log INFO (not WARNING)."""
+    from datetime import datetime, timezone
+    from gundi_core.events import LogLevel
+
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=False, doppler_settle_hours=6,
+    )
+    # Fix is ~5 min before the patched 'now' -> within the 6h window -> held.
+    messages = [{
+        "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 0,
+        "dopplerDatetime": "2026-05-17T01:55:00.000",
+        "dopplerLocLat": -46.7, "dopplerLocLon": 168.3, "dopplerLocClass": "2",
+    }]
+    mock_send = AsyncMock(return_value={})
+    mock_log = AsyncMock()
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock(return_value=messages))
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", mock_log)
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+    mocker.patch(
+        "app.actions.handlers._utc_now",
+        return_value=datetime(2026, 5, 17, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = await action_pull_telemetry(
+        integration=integration_with_id, action_config=config,
+    )
+
+    assert result["observations_sent"] == 0
+    mock_send.assert_not_called()
+    held_calls = [
+        c for c in mock_log.call_args_list
+        if "held pending settle window" in (c.kwargs.get("title") or "")
+    ]
+    assert held_calls, "expected a 'held pending settle window' summary log"
+    assert held_calls[0].kwargs["level"] == LogLevel.INFO
+    assert all(c.kwargs.get("level") != LogLevel.WARNING for c in mock_log.call_args_list)
