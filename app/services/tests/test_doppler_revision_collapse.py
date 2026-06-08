@@ -162,3 +162,18 @@ def test_preserves_input_order():
     # rev0 collapses into rev2; GPS observations keep their relative positions.
     assert kept == [g1, d_new, g2]
     assert stats["revisions_collapsed"] == 1
+
+
+def test_holds_entire_fix_when_a_revision_straddles_the_cutoff():
+    """If any revision of a (source, dopplerLocId) is unsettled, the whole fix is held.
+
+    Guards against emitting an early revision now (settled) and its corrected
+    revision later (still within the window) — the duplicate this PR prevents.
+    """
+    now = datetime(2026, 5, 17, 7, 30, 0, tzinfo=timezone.utc)  # cutoff = 01:30 with 6h window
+    rev0 = _obs("45020", 11, 0, "2026-05-17T01:28:53.197", -46.60373, 168.33551, cls="B")  # <= cutoff
+    rev2 = _obs("45020", 11, 2, "2026-05-17T01:31:09.327", -46.68636, 168.31857, cls="2")  # > cutoff
+    kept, stats = collapse_doppler_revisions([rev0, rev2], SETTLE, now)
+    assert kept == []  # neither revision emitted — the whole fix waits
+    assert stats["held_unsettled"] == 1
+    assert stats["revisions_collapsed"] == 0

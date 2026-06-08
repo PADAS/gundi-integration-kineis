@@ -387,21 +387,25 @@ def collapse_doppler_revisions(
     Collapse CLS Doppler location revisions to one observation per fix.
 
     Only observations with location_type == "doppler" are affected:
-      1. Settle: drop (hold) any whose recorded_at is newer than now - settle_window.
-         Skipped when settle_window <= 0. Held observations are re-emitted by a
-         later run once past the window — on the realtime path each message is
-         delivered only once, so re-emission relies on the daily backfill action
-         (which re-fetches by time window). With settle_window > 0, the
-         backfill_telemetry action must be enabled or held fixes are never sent.
-      2. Collapse: group by (source, dopplerLocId) and keep only the highest
-         dopplerRevision (tie-break: latest dopplerAcqDatetime, then last seen).
-         Observations with no dopplerLocId each form their own group.
+      1. Group by (source, dopplerLocId) — each is one physical fix. Observations
+         with no dopplerLocId each form their own singleton group.
+      2. Settle: hold the ENTIRE fix if ANY of its revisions has recorded_at newer
+         than now - settle_window. Because revisions of one fix have different
+         dopplerDatetimes, holding per-revision could emit an early revision now
+         and a corrected one later (the duplicate this guards against); holding the
+         whole fix avoids that. Skipped when settle_window <= 0. Held fixes are
+         re-emitted by a later run once past the window — on the realtime path each
+         message is delivered only once, so re-emission relies on the daily
+         backfill action (which re-fetches by time window). With settle_window > 0,
+         the backfill_telemetry action must be enabled or held fixes are never sent.
+      3. Collapse: for an emitted fix, keep only the highest dopplerRevision
+         (tie-break: latest dopplerAcqDatetime, then last seen).
 
     Non-doppler observations pass through untouched. The output preserves the
     original input ordering of all kept observations.
 
     Returns (kept_observations, stats) where stats has integer keys
-    "held_unsettled" and "revisions_collapsed".
+    "held_unsettled" (count of fixes held this run) and "revisions_collapsed".
     now must be a timezone-aware UTC datetime.
     """
     cutoff: Optional[datetime] = None
@@ -410,41 +414,37 @@ def collapse_doppler_revisions(
             raise ValueError("now must be timezone-aware (e.g. datetime.now(timezone.utc))")
         cutoff = now - settle_window
 
-    # Settle step: find Doppler observations (by original index) that survive the
-    # hold window. Non-doppler observations are never held.
-    held = 0
-    surviving_doppler_idx: List[int] = []
+    # Group all Doppler observations by (source, dopplerLocId), tracking original
+    # indices. Non-doppler observations are never grouped or held.
+    groups: Dict[Any, List[int]] = {}
     for idx, obs in enumerate(observations):
         if obs.get("location_type") != "doppler":
             continue
-        if cutoff is not None:
-            recorded = _parse_iso_utc(obs.get("recorded_at"))
-            if recorded is not None and recorded > cutoff:
-                held += 1
-                continue
-        surviving_doppler_idx.append(idx)
-
-    # Collapse step: group survivors by (source, dopplerLocId) and pick the
-    # winning revision per group. Track winners by original index.
-    groups: Dict[Any, List[int]] = {}
-    for idx in surviving_doppler_idx:
-        obs = observations[idx]
         loc_id = (obs.get("additional") or {}).get("dopplerLocId")
         key = ("__no_locid__", idx) if loc_id is None else (obs.get("source"), loc_id)
         groups.setdefault(key, []).append(idx)
 
-    winners: set = set()
+    def _is_unsettled(index: int) -> bool:
+        recorded = _parse_iso_utc(observations[index].get("recorded_at"))
+        return recorded is not None and cutoff is not None and recorded > cutoff
+
+    held_fixes = 0
     collapsed = 0
+    winners: set = set()
     for idxs in groups.values():
+        # Hold the whole fix if any revision is still within the settle window.
+        if cutoff is not None and any(_is_unsettled(i) for i in idxs):
+            held_fixes += 1
+            continue
         best_idx = max(idxs, key=lambda i: _revision_sort_key(observations[i], i))
         winners.add(best_idx)
         collapsed += len(idxs) - 1
 
     # Rebuild in original order: keep every non-doppler observation and the
-    # winning revision of each Doppler group; drop held and superseded revisions.
+    # winning revision of each emitted fix; drop held and superseded revisions.
     kept: List[Dict[str, Any]] = [
         obs for idx, obs in enumerate(observations)
         if obs.get("location_type") != "doppler" or idx in winners
     ]
 
-    return kept, {"held_unsettled": held, "revisions_collapsed": collapsed}
+    return kept, {"held_unsettled": held_fixes, "revisions_collapsed": collapsed}

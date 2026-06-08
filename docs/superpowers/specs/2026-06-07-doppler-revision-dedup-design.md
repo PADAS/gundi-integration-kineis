@@ -54,15 +54,19 @@ transform, over the produced observation list. It only touches observations with
 `location_type == "doppler"`; GPS and unlocated observations pass through
 unchanged (GPS fixes are final on arrival).
 
-1. **Settle filter.** Drop any Doppler observation whose `recorded_at`
-   (= `dopplerDatetime`) is newer than `now − settle_window`. The fix may still
-   be revised by CLS, so we hold it. A held observation is not lost: a later run
-   re-fetches it and emits it once it is past the window.
-2. **Revision collapse.** Group the surviving Doppler observations by
-   `(source, dopplerLocId)` and keep only the one with the highest
-   `dopplerRevision`. Tie-break deterministically: highest `dopplerAcqDatetime`,
-   then last seen. Observations missing a `dopplerLocId` each form their own
-   singleton group (never collapsed).
+1. **Group by fix.** Group Doppler observations by `(source, dopplerLocId)` —
+   each group is one physical fix. Observations missing a `dopplerLocId` each
+   form their own singleton group.
+2. **Settle filter (per fix).** Hold the *entire* fix if *any* of its revisions
+   has `recorded_at` (= `dopplerDatetime`) newer than `now − settle_window`.
+   Because revisions of one fix have different `dopplerDatetime`s, a per-revision
+   filter could let an early revision pass the cutoff while a newer one is held —
+   emitting the early revision now and the corrected one later, recreating the
+   duplicate. Holding the whole fix prevents that. A held fix is not lost: a
+   later run re-fetches it and emits it once past the window.
+3. **Revision collapse.** For an emitted fix, keep only the revision with the
+   highest `dopplerRevision`. Tie-break deterministically: highest
+   `dopplerAcqDatetime`, then last seen. Output preserves input order.
 
 ### Why it survives across runs
 
