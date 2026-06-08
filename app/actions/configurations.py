@@ -7,6 +7,12 @@ from app.actions.core import AuthActionConfiguration, ExecutableActionMixin, Pul
 from app.services.errors import ConfigurationNotFound
 from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions, UIOptions, find_config_for_action
 
+# action_backfill_telemetry runs daily (see @crontab_schedule("0 2 * * *") in handlers.py).
+# A Doppler fix held by the settle window must still fall inside the NEXT daily
+# backfill's lookback window to ever be emitted, so lookback must exceed this interval
+# by at least the settle window.
+BACKFILL_INTERVAL_HOURS = 24
+
 
 class AuthenticateKineisConfig(AuthActionConfiguration, ExecutableActionMixin):
     """Configuration for the Kineis auth action (portal credential verification)."""
@@ -142,11 +148,11 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
     """
 
     lookback_hours: int = FieldWithUIOptions(
-        24,
+        48,
         ge=1,
         le=168,
         title="Lookback hours",
-        description="Hours to look back. Default 24h; max 168h (7 days).",
+        description="Hours to look back. Default 48h; max 168h (7 days). When doppler_settle_hours > 0 this must be >= 24h (the daily backfill interval) + doppler_settle_hours, so fixes held by the settle window are re-fetched on the next run instead of being dropped.",
         ui_options=UIOptions(widget="range"),
     )
     page_size: int = FieldWithUIOptions(
@@ -195,6 +201,23 @@ class BackfillTelemetryConfiguration(PullActionConfiguration):
             raise ValueError(
                 "Provide only one of device_refs or device_uids; the API does not accept both."
             )
+        return values
+
+    @root_validator
+    def lookback_covers_settle_window(cls, values):
+        """When settling is enabled, the daily backfill must look back far enough to
+        re-fetch fixes held on the previous run, or they are silently dropped."""
+        settle = values.get("doppler_settle_hours") or 0
+        lookback = values.get("lookback_hours") or 0
+        if settle > 0:
+            required = BACKFILL_INTERVAL_HOURS + settle
+            if lookback < required:
+                raise ValueError(
+                    f"lookback_hours ({lookback}) must be >= {required} when doppler_settle_hours "
+                    f"is {settle} (daily backfill interval {BACKFILL_INTERVAL_HOURS}h + settle window), "
+                    "so Doppler fixes held by the settle window are re-fetched and emitted on the "
+                    "next backfill run instead of being dropped."
+                )
         return values
 
     ui_global_options = GlobalUISchemaOptions(

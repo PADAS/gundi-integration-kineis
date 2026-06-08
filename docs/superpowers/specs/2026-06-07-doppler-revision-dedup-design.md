@@ -92,6 +92,13 @@ re-emitted only by the daily backfill, which re-fetches by time window. A
 realtime-only deployment with a non-zero settle window would never send held
 Doppler fixes.
 
+The backfill's `lookback_hours` must also be wide enough to re-fetch fixes held
+on the previous daily run. A fix arriving less than `settle` before a run is
+held; the next run (24h later) must still cover it, so the backfill config
+enforces `lookback_hours >= 24 + doppler_settle_hours` (the daily interval plus
+the settle window) when settling is enabled, failing fast instead of silently
+dropping fixes. The backfill `lookback_hours` default is 48h.
+
 ### Handler wiring
 
 In both `action_pull_telemetry` and `action_backfill_telemetry`, after building

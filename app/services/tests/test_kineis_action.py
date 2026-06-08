@@ -48,8 +48,21 @@ def test_pull_telemetry_config_doppler_settle_hours_default_and_bounds():
     with pytest.raises(pydantic.ValidationError):
         PullTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=49)
 
-    bf = BackfillTelemetryConfiguration(lookback_hours=24, page_size=100)
+    bf = BackfillTelemetryConfiguration(lookback_hours=48, page_size=100)
     assert bf.doppler_settle_hours == 6
+
+
+def test_backfill_config_requires_lookback_to_cover_settle_window():
+    """Backfill lookback_hours must be >= 24 + doppler_settle_hours when settling."""
+    # Too small: 24h lookback with a 6h settle window would drop held fixes.
+    with pytest.raises(pydantic.ValidationError):
+        BackfillTelemetryConfiguration(lookback_hours=24, page_size=100, doppler_settle_hours=6)
+    # Exactly 24 + settle is allowed.
+    ok = BackfillTelemetryConfiguration(lookback_hours=30, page_size=100, doppler_settle_hours=6)
+    assert ok.lookback_hours == 30
+    # Settling disabled: the lookback constraint does not apply.
+    disabled = BackfillTelemetryConfiguration(lookback_hours=4, page_size=100, doppler_settle_hours=0)
+    assert disabled.doppler_settle_hours == 0
 
 
 @pytest.fixture
@@ -337,7 +350,9 @@ async def test_action_pull_telemetry_all_skipped_logs_warning(
 
 @pytest.fixture
 def backfill_telemetry_config():
-    return BackfillTelemetryConfiguration(lookback_hours=24, page_size=100)
+    # Settling disabled here so the pre-existing backfill tests (which assert all
+    # observations are sent) are unaffected; settling has its own dedicated tests.
+    return BackfillTelemetryConfiguration(lookback_hours=24, page_size=100, doppler_settle_hours=0)
 
 
 @pytest.mark.asyncio
