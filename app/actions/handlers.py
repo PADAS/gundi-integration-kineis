@@ -14,6 +14,7 @@ from app.actions.configurations import (
 )
 from app.actions.transformers import (
     collapse_doppler_revisions,
+    reconcile_doppler_buffer,
     telemetry_batch_to_observations_detailed,
 )
 from app.services.activity_logger import activity_logger, log_action_activity
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 OBSERVATION_BATCH_SIZE = 200
 REALTIME_STATE_KEY = "kineis_realtime_checkpoint"
+DOPPLER_BUFFER_STATE_KEY = "kineis_doppler_buffer"
 
 
 async def action_auth(integration, action_config: AuthenticateKineisConfig):
@@ -72,11 +74,13 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
 
     use_realtime = action_config.use_realtime
     checkpoint = 0
+    doppler_buffer: Dict[str, Dict] = {}
     if use_realtime:
         try:
             state_mgr = IntegrationStateManager()
             state = await state_mgr.get_state(integration_id, action_id)
             checkpoint = state.get(REALTIME_STATE_KEY, 0)
+            doppler_buffer = state.get(DOPPLER_BUFFER_STATE_KEY, {}) or {}
         except Exception as e:
             logger.warning("Could not load realtime checkpoint, using bulk: %s", e)
             use_realtime = False
@@ -100,13 +104,6 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             retrieve_raw_data=action_config.retrieve_raw_data,
             client_id=auth_config.client_id,
         )
-        try:
-            state_mgr = IntegrationStateManager()
-            await state_mgr.set_state(
-                integration_id, action_id, {REALTIME_STATE_KEY: new_checkpoint}
-            )
-        except Exception as e:
-            logger.warning("Could not persist realtime checkpoint: %s", e)
     else:
         to_time = _utc_now()
         from_time = to_time - timedelta(hours=action_config.lookback_hours)
@@ -133,11 +130,20 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             client_id=auth_config.client_id,
         )
 
-    if not messages:
+    if not messages and not (use_realtime and doppler_buffer):
         log_data = {"messages_fetched": 0}
         if use_realtime:
             log_data["checkpoint_from"] = checkpoint
+            # new_checkpoint is always assigned here: use_realtime is True only after fetch_telemetry_realtime ran
             log_data["checkpoint_to"] = new_checkpoint
+            try:
+                state_mgr = IntegrationStateManager()
+                await state_mgr.set_state(
+                    integration_id, action_id,
+                    {REALTIME_STATE_KEY: new_checkpoint, DOPPLER_BUFFER_STATE_KEY: doppler_buffer},
+                )
+            except Exception as e:
+                logger.warning("Could not persist realtime checkpoint/buffer: %s", e)
         await log_action_activity(
             integration_id=integration_id,
             action_id=action_id,
@@ -148,30 +154,56 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
         return {"messages_fetched": 0, "observations_sent": 0, "skipped": 0}
 
     device_uid_to_customer_name: Dict[int, str] = {}
-    try:
-        devices = await fetch_device_list(
-            integration_id=integration_id,
-            username=auth_config.username,
-            password=auth_config.password.get_secret_value(),
-            client_id=auth_config.client_id,
-        )
-        device_uid_to_customer_name = {
-            d["deviceUid"]: d["customerName"]
-            for d in devices
-            if d.get("customerName")
-        }
-    except Exception as e:
-        logger.warning("Could not fetch device list for source_name, using fallback: %s", e)
+    if messages:
+        try:
+            devices = await fetch_device_list(
+                integration_id=integration_id,
+                username=auth_config.username,
+                password=auth_config.password.get_secret_value(),
+                client_id=auth_config.client_id,
+            )
+            device_uid_to_customer_name = {
+                d["deviceUid"]: d["customerName"]
+                for d in devices
+                if d.get("customerName")
+            }
+        except Exception as e:
+            logger.warning("Could not fetch device list for source_name, using fallback: %s", e)
 
     transform_result = telemetry_batch_to_observations_detailed(
         messages,
         device_uid_to_customer_name=device_uid_to_customer_name,
     )
-    observations, dedup_stats = collapse_doppler_revisions(
-        transform_result.observations,
-        settle_window=timedelta(hours=action_config.doppler_settle_hours),
-        now=_utc_now(),
-    )
+    settle = timedelta(hours=action_config.doppler_settle_hours)
+    doppler_summary: Dict = {}
+    if use_realtime:
+        observations, doppler_buffer, buf_stats = reconcile_doppler_buffer(
+            doppler_buffer, transform_result.observations, settle, _utc_now(),
+        )
+        if buf_stats["revisions_collapsed"]:
+            doppler_summary["doppler_revisions_collapsed"] = buf_stats["revisions_collapsed"]
+        if buf_stats["emitted_from_buffer"]:
+            doppler_summary["doppler_emitted_from_buffer"] = buf_stats["emitted_from_buffer"]
+        if buf_stats["buffered"]:
+            doppler_summary["doppler_buffered"] = buf_stats["buffered"]
+        # Persist checkpoint+buffer before sending: like the original checkpoint advance,
+        # a send failure after this point is intentionally backstopped by the daily backfill.
+        try:
+            state_mgr = IntegrationStateManager()
+            await state_mgr.set_state(
+                integration_id, action_id,
+                {REALTIME_STATE_KEY: new_checkpoint, DOPPLER_BUFFER_STATE_KEY: doppler_buffer},
+            )
+        except Exception as e:
+            logger.warning("Could not persist realtime checkpoint/buffer: %s", e)
+    else:
+        observations, dedup_stats = collapse_doppler_revisions(
+            transform_result.observations, settle_window=settle, now=_utc_now(),
+        )
+        if dedup_stats["revisions_collapsed"]:
+            doppler_summary["doppler_revisions_collapsed"] = dedup_stats["revisions_collapsed"]
+        if dedup_stats["held_unsettled"]:
+            doppler_summary["doppler_held_unsettled"] = dedup_stats["held_unsettled"]
     skipped = transform_result.total_skipped
 
     sent_total = 0
@@ -192,10 +224,7 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
     if skipped:
         summary_data["skipped"] = skipped
         summary_data["skip_reasons"] = transform_result.skip_reasons
-    if dedup_stats["revisions_collapsed"]:
-        summary_data["doppler_revisions_collapsed"] = dedup_stats["revisions_collapsed"]
-    if dedup_stats["held_unsettled"]:
-        summary_data["doppler_held_unsettled"] = dedup_stats["held_unsettled"]
+    summary_data.update(doppler_summary)
     if transform_result.devices_with_location:
         summary_data["devices_with_location"] = sorted(transform_result.devices_with_location)
     if transform_result.devices_without_location:
@@ -209,11 +238,12 @@ async def action_pull_telemetry(integration, action_config: PullTelemetryConfigu
             level=LogLevel.INFO,
             data=summary_data,
         )
-    elif dedup_stats["held_unsettled"]:
+    elif doppler_summary.get("doppler_held_unsettled") or doppler_summary.get("doppler_buffered"):
+        held = doppler_summary.get("doppler_held_unsettled") or doppler_summary.get("doppler_buffered")
         await log_action_activity(
             integration_id=integration_id,
             action_id=action_id,
-            title=f"No observations sent; {dedup_stats['held_unsettled']} Doppler fix(es) held pending settle window",
+            title=f"No observations sent; {held} Doppler fix(es) awaiting settle window",
             level=LogLevel.INFO,
             data=summary_data,
         )

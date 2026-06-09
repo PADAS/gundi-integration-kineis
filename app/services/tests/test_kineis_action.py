@@ -234,7 +234,7 @@ async def test_action_pull_telemetry_uses_realtime_when_checkpoint_stored(
     assert mock_realtime.call_args[1]["checkpoint"] == 0
     mock_state_set.assert_called_once()
     call_state = mock_state_set.call_args[0]
-    assert call_state[2] == {"kineis_realtime_checkpoint": 12345}
+    assert call_state[2] == {"kineis_realtime_checkpoint": 12345, "kineis_doppler_buffer": {}}
 
 
 @pytest.mark.asyncio
@@ -582,8 +582,121 @@ async def test_action_pull_telemetry_held_fixes_log_info_not_warning(
     mock_send.assert_not_called()
     held_calls = [
         c for c in mock_log.call_args_list
-        if "held pending settle window" in (c.kwargs.get("title") or "")
+        if "awaiting settle window" in (c.kwargs.get("title") or "")
     ]
-    assert held_calls, "expected a 'held pending settle window' summary log"
+    assert held_calls, "expected a 'awaiting settle window' summary log"
     assert held_calls[0].kwargs["level"] == LogLevel.INFO
     assert all(c.kwargs.get("level") != LogLevel.WARNING for c in mock_log.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_realtime_buffers_then_emits_settled_fix(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """A Doppler fix is buffered while unsettled (run 1) and emitted once settled (run 2)."""
+    from datetime import datetime, timezone
+
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=True, doppler_settle_hours=6,
+    )
+
+    store = {}
+
+    async def fake_get_state(integration_id, action_id, source_id="no-source"):
+        return dict(store)
+
+    async def fake_set_state(integration_id, action_id, state, source_id="no-source"):
+        store.clear()
+        store.update(state)
+
+    state_mgr = MagicMock()
+    state_mgr.get_state = AsyncMock(side_effect=fake_get_state)
+    state_mgr.set_state = AsyncMock(side_effect=fake_set_state)
+    mocker.patch("app.actions.handlers.IntegrationStateManager", return_value=state_mgr)
+
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock())
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+
+    fix_dt = "2026-05-17T01:55:00.000"
+    msg = {
+        "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 0,
+        "dopplerDatetime": fix_dt, "dopplerLocLat": -46.7, "dopplerLocLon": 168.3,
+        "dopplerLocClass": "2",
+    }
+
+    mocker.patch("app.actions.handlers.fetch_telemetry_realtime",
+                 AsyncMock(return_value=([msg], 100)))
+    mocker.patch("app.actions.handlers._utc_now",
+                 return_value=datetime(2026, 5, 17, 2, 0, 0, tzinfo=timezone.utc))
+    r1 = await action_pull_telemetry(integration=integration_with_id, action_config=config)
+    assert r1["observations_sent"] == 0
+    assert "45020|11" in store["kineis_doppler_buffer"]
+
+    mocker.patch("app.actions.handlers.fetch_telemetry_realtime",
+                 AsyncMock(return_value=([], 101)))
+    mocker.patch("app.actions.handlers._utc_now",
+                 return_value=datetime(2026, 5, 17, 9, 0, 0, tzinfo=timezone.utc))
+    r2 = await action_pull_telemetry(integration=integration_with_id, action_config=config)
+    assert r2["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert sent[0]["additional"]["dopplerLocId"] == 11
+    assert store["kineis_doppler_buffer"] == {}
+    assert store["kineis_realtime_checkpoint"] == 101
+
+
+@pytest.mark.asyncio
+async def test_realtime_emits_settled_and_buffers_unsettled_same_run(
+    mocker, integration_with_id, authenticate_kineis_config
+):
+    """One run with a settled fix (emitted) and an unsettled fix (buffered)."""
+    from datetime import datetime, timezone
+
+    config = PullTelemetryConfiguration(
+        lookback_hours=4, page_size=100, use_realtime=True, doppler_settle_hours=6,
+    )
+    store = {}
+
+    async def fake_get_state(integration_id, action_id, source_id="no-source"):
+        return dict(store)
+
+    async def fake_set_state(integration_id, action_id, state, source_id="no-source"):
+        store.clear(); store.update(state)
+
+    state_mgr = MagicMock()
+    state_mgr.get_state = AsyncMock(side_effect=fake_get_state)
+    state_mgr.set_state = AsyncMock(side_effect=fake_set_state)
+    mocker.patch("app.actions.handlers.IntegrationStateManager", return_value=state_mgr)
+
+    mock_send = AsyncMock(return_value={})
+    mocker.patch("app.actions.handlers.fetch_telemetry", AsyncMock())
+    mocker.patch("app.actions.handlers.fetch_device_list", AsyncMock(return_value=[]))
+    mocker.patch("app.actions.handlers.send_observations_to_gundi", mock_send)
+    mocker.patch("app.actions.handlers.log_action_activity", AsyncMock())
+    mocker.patch("app.services.activity_logger.publish_event", AsyncMock())
+    mocker.patch("app.actions.handlers.get_auth_config", return_value=authenticate_kineis_config)
+    mocker.patch("app.actions.handlers._utc_now",
+                 return_value=datetime(2026, 5, 17, 9, 0, 0, tzinfo=timezone.utc))
+
+    settled = {  # ~7h before now -> settled, emitted
+        "deviceRef": "45020", "dopplerLocId": 11, "dopplerRevision": 2,
+        "dopplerDatetime": "2026-05-17T02:00:00.000",
+        "dopplerLocLat": -46.6, "dopplerLocLon": 168.3, "dopplerLocClass": "2",
+    }
+    unsettled = {  # ~5 min before now -> buffered
+        "deviceRef": "45020", "dopplerLocId": 99, "dopplerRevision": 0,
+        "dopplerDatetime": "2026-05-17T08:55:00.000",
+        "dopplerLocLat": -46.7, "dopplerLocLon": 168.4, "dopplerLocClass": "2",
+    }
+    mocker.patch("app.actions.handlers.fetch_telemetry_realtime",
+                 AsyncMock(return_value=([settled, unsettled], 100)))
+
+    result = await action_pull_telemetry(integration=integration_with_id, action_config=config)
+    assert result["observations_sent"] == 1
+    sent = mock_send.call_args[1]["observations"]
+    assert sent[0]["additional"]["dopplerLocId"] == 11
+    assert list(store["kineis_doppler_buffer"].keys()) == ["45020|99"]
