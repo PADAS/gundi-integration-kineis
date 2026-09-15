@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 
@@ -26,9 +27,18 @@ from gundi_core.events import (
     CustomWebhookLog,
 )
 from app import settings
+from app.services.errors import format_error_message
 
 
 logger = logging.getLogger(__name__)
+
+
+# Set for the duration of an ephemeral run (reference or auth). Every publish
+# path checks it and short-circuits — no integration to log against, and
+# draft credentials must never touch PubSub.
+ephemeral_run: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ephemeral_run", default=False
+)
 
 
 # Publish events for other services or system components
@@ -40,6 +50,8 @@ logger = logging.getLogger(__name__)
     wait_jitter=5.0
 )
 async def publish_event(event: SystemEventBaseModel, topic_name: str):
+    if ephemeral_run.get():
+        return None
     timeout_settings = aiohttp.ClientTimeout(total=20.0)
     async with aiohttp.ClientSession(
         raise_for_status=True, timeout=timeout_settings
@@ -154,12 +166,12 @@ def activity_logger(on_start=True, on_completion=True, on_error=True):
                                 integration_id=integration_id,
                                 action_id=action_id,
                                 config_data=config_data,
-                                error=str(e)
+                                error=format_error_message(e) or str(e)
                             )
                         ),
                         topic_name=settings.INTEGRATION_EVENTS_TOPIC,
                     )
-                raise e
+                raise
             else:
                 if on_completion:
                     await publish_event(
@@ -208,12 +220,12 @@ def webhook_activity_logger(on_start=True, on_completion=True, on_error=True):
                                 integration_id=integration_id,
                                 webhook_id=webhook_id,
                                 config_data=config_data,
-                                error=str(e)
+                                error=format_error_message(e) or str(e)
                             )
                         ),
                         topic_name=settings.INTEGRATION_EVENTS_TOPIC,
                     )
-                raise e
+                raise
             else:
                 if on_completion:
                     await publish_event(
