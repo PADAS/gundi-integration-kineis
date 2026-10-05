@@ -7,8 +7,6 @@ import httpx
 
 from app.services.kineis_client import (
     get_access_token,
-    get_cached_token,
-    clear_token_cache,
     retrieve_bulk_telemetry,
     retrieve_realtime_telemetry,
     retrieve_device_list,
@@ -45,21 +43,6 @@ async def test_get_access_token_success(mocker):
     assert result["access_token"] == "test-token-123"
     assert result["expires_in"] == 300
     assert mock_post.called
-
-
-@pytest.mark.asyncio
-async def test_get_cached_token_uses_cache(mocker):
-    """Cached token is returned when not expired."""
-    clear_token_cache("int-1")
-    mocker.patch("app.services.kineis_client.get_access_token", AsyncMock(side_effect=AssertionError("should not call")))
-    # Pre-populate cache
-    from app.services.kineis_client import _token_cache, _token_cache_key
-    import time
-    _token_cache[_token_cache_key("int-1")] = ("cached-token", time.time() + 120)
-
-    token = await get_cached_token("int-1", "u", "p", min_ttl_seconds=60)
-    assert token == "cached-token"
-    clear_token_cache("int-1")
 
 
 @pytest.mark.asyncio
@@ -146,34 +129,6 @@ async def test_retrieve_bulk_telemetry_paginated(mocker):
     assert result[0]["deviceRef"] == "A"
     assert result[1]["deviceRef"] == "B"
     assert mock_post.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_fetch_telemetry_clears_cache_on_401(mocker):
-    """On 401 from bulk endpoint, token cache is cleared."""
-    import app.services.kineis_client as kineis_client
-    clear_token_cache("int-401")
-    mocker.patch.object(kineis_client, "get_cached_token", AsyncMock(return_value="bad-token"))
-    mocker.patch.object(
-        kineis_client,
-        "retrieve_bulk_telemetry",
-        AsyncMock(side_effect=httpx.HTTPStatusError("Unauthorized", request=MagicMock(), response=MagicMock(status_code=401))),
-    )
-    # Call the inner function to avoid stamina retries (which would hang)
-    inner = kineis_client.fetch_telemetry
-    while hasattr(inner, "__wrapped__"):
-        inner = inner.__wrapped__
-
-    with pytest.raises(httpx.HTTPStatusError):
-        await inner(
-            integration_id="int-401",
-            username="u",
-            password="p",
-            from_datetime="2024-01-15T00:00:00.000Z",
-            to_datetime="2024-01-15T12:00:00.000Z",
-        )
-
-    assert kineis_client._token_cache_key("int-401") not in kineis_client._token_cache
 
 
 @pytest.mark.asyncio

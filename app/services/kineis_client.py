@@ -5,16 +5,40 @@ Kineis/CLS API client for bulk telemetry retrieval (CONNECTORS-836).
 - Bulk telemetry: POST /telemetry/api/v1/retrieve-bulk with pagination
 """
 
+import hashlib
 import logging
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
 
 import httpx
 import stamina
+from gundi_client_v2.token_cache import (
+    NO_REFRESH,
+    CachedToken,
+    MemoryTokenCache,
+    TokenStore,
+    token_cache_from_url,
+)
 
 from app import settings
+from app.services.retry_policies import is_retryable_failure
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+TOKEN_KEY_PREFIX = "kineis:token:"
+TOKEN_MIN_TTL_SECONDS = 60
+
+# Retries only what may pass on the next attempt (transport failures, 429, 5xx).
+# A 400/401/403 is a definite answer: retrying it, with the re-login each
+# attempt implies, is what gets an account throttled by the CLS identity server.
+PROVIDER_RETRY = dict(on=is_retryable_failure, wait_initial=10.0, wait_jitter=10.0, wait_max=300.0)
+
+# Kineis tokens get their own memory layer: the Gundi client's process cache is
+# keyed for its credentials, and clearing one must never drop the other.
+_memory = MemoryTokenCache()
+
 
 def _auth_path() -> str:
     return getattr(
@@ -22,6 +46,22 @@ def _auth_path() -> str:
         "KINEIS_AUTH_PATH",
         "/auth/realms/cls/protocol/openid-connect/token",
     )
+
+
+def _token_url(auth_base_url: Optional[str] = None) -> str:
+    base = auth_base_url or settings.KINEIS_AUTH_BASE_URL
+    return base.rstrip("/") + _auth_path()
+
+
+async def _post_token_request(url: str, data: Dict[str, str]) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        response = await client.post(
+            url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 async def get_access_token(
@@ -35,31 +75,73 @@ async def get_access_token(
     Uses password grant: grant_type=password, client_id, username, password.
     Returns dict with access_token, expires_in (seconds), and optionally refresh_token.
     """
-    base = auth_base_url or settings.KINEIS_AUTH_BASE_URL
-    path = _auth_path()
-    url = base.rstrip("/") + path
-    data = {
-        "grant_type": "password",
-        "client_id": client_id,
-        "username": username,
-        "password": password,
-    }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        response = await client.post(
-            url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        response.raise_for_status()
-        return response.json()
+    return await _post_token_request(
+        _token_url(auth_base_url),
+        {
+            "grant_type": "password",
+            "client_id": client_id,
+            "username": username,
+            "password": password,
+        },
+    )
 
 
-def _token_cache_key(integration_id: str) -> str:
-    return f"kineis_token:{integration_id}"
+async def refresh_access_token(
+    refresh_token: str,
+    client_id: str = "api-telemetry",
+    auth_base_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Exchange a refresh token for a new access token (refresh_token grant)."""
+    return await _post_token_request(
+        _token_url(auth_base_url),
+        {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+        },
+    )
 
 
-# Simple in-memory token cache: (token, expires_at_ts)
-_token_cache: Dict[str, tuple] = {}
+def _token_cache_key(
+    integration_id: str, username: str, client_id: str, auth_base_url: Optional[str] = None
+) -> str:
+    # The integration id is part of the key so two integrations naming the same
+    # CLS username never share a token: the cache cannot check the password, and
+    # sharing would hand one integration's token to another that typed the wrong
+    # one. The password stays out of the key (see gundi_client_v2.token_cache_key).
+    material = "\x1f".join([integration_id, _token_url(auth_base_url), client_id or "", username])
+    return TOKEN_KEY_PREFIX + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _token_store() -> TokenStore:
+    # Backed by the runner's Redis token-cache db when one is configured, so a
+    # token outlives the instance that fetched it: scheduled runs land on
+    # whichever instance Pub/Sub reaches, often a cold one.
+    return TokenStore(token_cache_from_url(settings.GUNDI_TOKEN_CACHE_URL), memory=_memory)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _to_cached_token(result: Dict[str, Any], now: datetime) -> CachedToken:
+    refresh_token = result.get("refresh_token") or ""
+    refresh_expires_in = result.get("refresh_expires_in")
+    if refresh_token and refresh_expires_in:
+        refresh_expires_at = now + timedelta(seconds=int(refresh_expires_in))
+    else:
+        refresh_expires_at = NO_REFRESH
+    return CachedToken(
+        access_token=result["access_token"],
+        refresh_token=refresh_token,
+        token_type=result.get("token_type") or "Bearer",
+        expires_at=now + timedelta(seconds=int(result.get("expires_in", 300))),
+        refresh_expires_at=refresh_expires_at,
+    )
+
+
+def _usable(token: Optional[CachedToken], now: datetime, min_ttl_seconds: int) -> bool:
+    return token is not None and token.expires_at - now >= timedelta(seconds=min_ttl_seconds)
 
 
 async def get_cached_token(
@@ -68,38 +150,77 @@ async def get_cached_token(
     password: str,
     client_id: str = "api-telemetry",
     auth_base_url: Optional[str] = None,
-    min_ttl_seconds: int = 60,
+    min_ttl_seconds: int = TOKEN_MIN_TTL_SECONDS,
 ) -> str:
     """
-    Return a valid Bearer token, using cache if still valid (with min_ttl_seconds
-    until expiry). On 401 from telemetry API, caller should clear cache and retry.
+    Return a Bearer token with at least min_ttl_seconds left: the shared cached
+    one, else a refreshed one, else a fresh password login. Concurrent callers in
+    this process wait for a single fetch.
     """
-    key = _token_cache_key(integration_id)
-    now = time.time()
-    if key in _token_cache:
-        token, expires_at = _token_cache[key]
-        if expires_at - now >= min_ttl_seconds:
-            return token
-        del _token_cache[key]
-    result = await get_access_token(
-        username=username,
-        password=password,
-        client_id=client_id,
-        auth_base_url=auth_base_url,
-    )
-    token = result["access_token"]
-    expires_in = int(result.get("expires_in", 300))
-    _token_cache[key] = (token, now + expires_in)
-    return token
+    store = _token_store()
+    key = _token_cache_key(integration_id, username, client_id, auth_base_url)
+    token = await store.get(key)
+    if _usable(token, _now(), min_ttl_seconds):
+        return token.access_token
+
+    async with store.lock(key):
+        token = await store.reload(key)
+        now = _now()
+        if _usable(token, now, min_ttl_seconds):
+            return token.access_token
+
+        result = None
+        if token is not None and token.refresh_is_live(now):
+            try:
+                result = await refresh_access_token(token.refresh_token, client_id, auth_base_url)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code not in (400, 401):
+                    raise
+                logger.info("Kineis refresh token rejected (%d); logging in again", e.response.status_code)
+        if result is None:
+            logger.info("Kineis password login for integration %s", integration_id)
+            result = await get_access_token(username, password, client_id, auth_base_url)
+
+        fresh = _to_cached_token(result, _now())
+        await store.set(key, fresh)
+        return fresh.access_token
 
 
-def clear_token_cache(integration_id: Optional[str] = None) -> None:
-    """Clear cached token for integration_id, or all if integration_id is None."""
-    if integration_id is None:
-        _token_cache.clear()
-        return
-    key = _token_cache_key(integration_id)
-    _token_cache.pop(key, None)
+async def _discard_token(key: str, rejected_access_token: str) -> None:
+    """Drop the cached token, unless it has already been replaced by another caller."""
+    store = _token_store()
+    async with store.lock(key):
+        current = await store.reload(key)
+        if current is not None and current.access_token == rejected_access_token:
+            await store.delete(key)
+
+
+def clear_token_cache() -> None:
+    """Forget every Kineis token held in this process (the Redis copies remain)."""
+    _memory.clear()
+
+
+async def _call_with_token(
+    integration_id: str,
+    username: str,
+    password: str,
+    client_id: str,
+    auth_base_url: Optional[str],
+    call: Callable[[str], Awaitable[T]],
+) -> T:
+    """Run ``call`` with a cached token. A 401 discards that token and retries
+    once with a new one; a second 401 is the provider's answer and propagates."""
+    key = _token_cache_key(integration_id, username, client_id, auth_base_url)
+    token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
+    try:
+        return await call(token)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 401:
+            raise
+    logger.info("Kineis API rejected the cached token for integration %s; re-authenticating once", integration_id)
+    await _discard_token(key, token)
+    token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
+    return await call(token)
 
 
 def _format_datetime_utc(dt: "datetime") -> str:
@@ -334,7 +455,7 @@ async def retrieve_device_list(
     return device_list
 
 
-@stamina.retry(on=httpx.HTTPError, wait_initial=10.0, wait_jitter=10.0, wait_max=300.0)
+@stamina.retry(**PROVIDER_RETRY)
 async def fetch_device_list(
     integration_id: str,
     username: str,
@@ -343,36 +464,14 @@ async def fetch_device_list(
     auth_base_url: Optional[str] = None,
     api_base_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Get Bearer token (cached) and fetch device list.
-    On 401, clears cache and raises.
-    """
-    try:
-        token = await get_cached_token(
-            integration_id=integration_id,
-            username=username,
-            password=password,
-            client_id=client_id,
-            auth_base_url=auth_base_url,
-            min_ttl_seconds=60,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
-
-    try:
-        return await retrieve_device_list(
-            access_token=token,
-            api_base_url=api_base_url,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
+    """Get a Bearer token (cached) and fetch the device list."""
+    return await _call_with_token(
+        integration_id, username, password, client_id, auth_base_url,
+        lambda token: retrieve_device_list(access_token=token, api_base_url=api_base_url),
+    )
 
 
-@stamina.retry(on=httpx.HTTPError, wait_initial=10.0, wait_jitter=10.0, wait_max=300.0)
+@stamina.retry(**PROVIDER_RETRY)
 async def fetch_telemetry(
     integration_id: str,
     username: str,
@@ -391,26 +490,12 @@ async def fetch_telemetry(
     api_base_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Get Bearer token (cached) and fetch all bulk telemetry in the time window.
+    Get a Bearer token (cached) and fetch all bulk telemetry in the time window.
     Requests GPS and Doppler by default so responses include location fields.
-    On 401, clears cache and raises so caller can retry once after re-auth.
     """
-    try:
-        token = await get_cached_token(
-            integration_id=integration_id,
-            username=username,
-            password=password,
-            client_id=client_id,
-            auth_base_url=auth_base_url,
-            min_ttl_seconds=60,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
-
-    try:
-        return await retrieve_bulk_telemetry(
+    return await _call_with_token(
+        integration_id, username, password, client_id, auth_base_url,
+        lambda token: retrieve_bulk_telemetry(
             access_token=token,
             from_datetime=from_datetime,
             to_datetime=to_datetime,
@@ -422,14 +507,11 @@ async def fetch_telemetry(
             retrieve_gps_loc=retrieve_gps_loc,
             retrieve_doppler=retrieve_doppler,
             api_base_url=api_base_url,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
+        ),
+    )
 
 
-@stamina.retry(on=httpx.HTTPError, wait_initial=10.0, wait_jitter=10.0, wait_max=300.0)
+@stamina.retry(**PROVIDER_RETRY)
 async def fetch_telemetry_realtime(
     integration_id: str,
     username: str,
@@ -445,26 +527,10 @@ async def fetch_telemetry_realtime(
     auth_base_url: Optional[str] = None,
     api_base_url: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """
-    Get Bearer token (cached) and fetch realtime telemetry since checkpoint.
-    Returns (messages, new_checkpoint). On 401, clears cache and raises.
-    """
-    try:
-        token = await get_cached_token(
-            integration_id=integration_id,
-            username=username,
-            password=password,
-            client_id=client_id,
-            auth_base_url=auth_base_url,
-            min_ttl_seconds=60,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
-
-    try:
-        return await retrieve_realtime_telemetry(
+    """Get a Bearer token (cached) and fetch realtime telemetry since checkpoint."""
+    return await _call_with_token(
+        integration_id, username, password, client_id, auth_base_url,
+        lambda token: retrieve_realtime_telemetry(
             access_token=token,
             checkpoint=checkpoint,
             device_refs=device_refs,
@@ -474,8 +540,5 @@ async def fetch_telemetry_realtime(
             retrieve_gps_loc=retrieve_gps_loc,
             retrieve_doppler=retrieve_doppler,
             api_base_url=api_base_url,
-        )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            clear_token_cache(integration_id)
-        raise
+        ),
+    )
