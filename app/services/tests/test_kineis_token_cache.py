@@ -331,3 +331,35 @@ async def test_token_store_uses_runner_token_cache_url(mocker):
     from_url.assert_called_once_with("redis://cache:6379/2")
     assert store._backend is sentinel
     assert store._memory is kineis_client._memory
+
+
+FETCH_WRAPPERS = [
+    ("fetch_device_list", "retrieve_device_list", {}),
+    (
+        "fetch_telemetry",
+        "retrieve_bulk_telemetry",
+        {"from_datetime": "2024-01-15T00:00:00.000Z", "to_datetime": "2024-01-15T12:00:00.000Z"},
+    ),
+    ("fetch_telemetry_realtime", "retrieve_realtime_telemetry", {"checkpoint": 5}),
+]
+
+
+@pytest.mark.parametrize("fetch_name,retrieve_name,kwargs", FETCH_WRAPPERS)
+@pytest.mark.asyncio
+async def test_transient_retry_does_not_reset_reauth_budget(
+    use_instance, token_endpoint, no_retry_waits, mocker, fetch_name, retrieve_name, kwargs
+):
+    use_instance()
+    stamina.set_testing(True, attempts=5)
+    retrieve = mocker.patch.object(
+        kineis_client,
+        retrieve_name,
+        side_effect=[_status_error(401), _status_error(503), _status_error(401), _status_error(401)],
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await getattr(kineis_client, fetch_name)("int-1", "u", "p", **kwargs)
+
+    assert exc_info.value.response.status_code == 401
+    assert retrieve.call_count == 3
+    assert token_endpoint.password_logins == 2

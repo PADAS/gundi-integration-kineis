@@ -12,6 +12,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypeVa
 
 import httpx
 import stamina
+# app.settings before gundi_client_v2: the first .env loader wins per key (see
+# app/settings/base.py).
+from app import settings
 from gundi_client_v2.token_cache import (
     NO_REFRESH,
     CachedToken,
@@ -20,7 +23,6 @@ from gundi_client_v2.token_cache import (
     token_cache_from_url,
 )
 
-from app import settings
 from app.services.retry_policies import is_retryable_failure
 
 logger = logging.getLogger(__name__)
@@ -208,19 +210,27 @@ async def _call_with_token(
     auth_base_url: Optional[str],
     call: Callable[[str], Awaitable[T]],
 ) -> T:
-    """Run ``call`` with a cached token. A 401 discards that token and retries
-    once with a new one; a second 401 is the provider's answer and propagates."""
+    """Run ``call`` with a cached token, retrying transient failures.
+
+    A 401 discards that token and re-authenticates, at most once per fetch: the
+    budget lives outside the retry loop so a transient failure in between does
+    not grant another login, and a 401 on a replacement token propagates.
+    """
     key = _token_cache_key(integration_id, username, client_id, auth_base_url)
-    token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
-    try:
-        return await call(token)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code != 401:
-            raise
-    logger.info("Kineis API rejected the cached token for integration %s; re-authenticating once", integration_id)
-    await _discard_token(key, token)
-    token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
-    return await call(token)
+    reauthenticated = False
+    async for attempt in stamina.retry_context(**PROVIDER_RETRY):
+        with attempt:
+            token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
+            try:
+                return await call(token)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 401 or reauthenticated:
+                    raise
+            reauthenticated = True
+            logger.info("Kineis API rejected the cached token for integration %s; re-authenticating once", integration_id)
+            await _discard_token(key, token)
+            token = await get_cached_token(integration_id, username, password, client_id, auth_base_url)
+            return await call(token)
 
 
 def _format_datetime_utc(dt: "datetime") -> str:
@@ -455,7 +465,6 @@ async def retrieve_device_list(
     return device_list
 
 
-@stamina.retry(**PROVIDER_RETRY)
 async def fetch_device_list(
     integration_id: str,
     username: str,
@@ -471,7 +480,6 @@ async def fetch_device_list(
     )
 
 
-@stamina.retry(**PROVIDER_RETRY)
 async def fetch_telemetry(
     integration_id: str,
     username: str,
@@ -511,7 +519,6 @@ async def fetch_telemetry(
     )
 
 
-@stamina.retry(**PROVIDER_RETRY)
 async def fetch_telemetry_realtime(
     integration_id: str,
     username: str,
