@@ -31,6 +31,9 @@ T = TypeVar("T")
 
 TOKEN_KEY_PREFIX = "kineis:token:"
 TOKEN_MIN_TTL_SECONDS = 60
+# Of the identity server's error body, how much reaches the log and the activity
+# event: enough for a Keycloak error JSON or the title of a block page.
+TOKEN_ERROR_BODY_CHARS = 300
 
 # Retries only what may pass on the next attempt (transport failures, 429, 5xx).
 # A 400/401/403 is a definite answer: retrying it, with the re-login each
@@ -55,6 +58,11 @@ def _token_url(auth_base_url: Optional[str] = None) -> str:
     return base.rstrip("/") + _auth_path()
 
 
+def _one_line(text: str, limit: int) -> str:
+    folded = " ".join(text.split())
+    return folded if len(folded) <= limit else folded[:limit].rstrip() + "…"
+
+
 async def _post_token_request(url: str, data: Dict[str, str]) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         response = await client.post(
@@ -62,7 +70,20 @@ async def _post_token_request(url: str, data: Dict[str, str]) -> Dict[str, Any]:
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        response.raise_for_status()
+        if not response.is_success:
+            # raise_for_status() would name only the status and URL. What the
+            # identity server answered (Keycloak's error JSON, a WAF block page)
+            # is what tells an operator why, so it goes in the message, on one
+            # short line: classify_error keeps the first line for the activity
+            # log. Still an HTTPStatusError, which is what the retry predicate
+            # and the refresh fallback read the status from.
+            body = _one_line(response.text, TOKEN_ERROR_BODY_CHARS)
+            logger.warning("CLS token endpoint answered %d: %s", response.status_code, body)
+            raise httpx.HTTPStatusError(
+                f"CLS token endpoint answered {response.status_code}: {body}",
+                request=response.request,
+                response=response,
+            )
         return response.json()
 
 

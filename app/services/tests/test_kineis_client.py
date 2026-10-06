@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 
+from app.services.errors import format_error_message
 from app.services.kineis_client import (
     get_access_token,
     retrieve_bulk_telemetry,
@@ -43,6 +44,56 @@ async def test_get_access_token_success(mocker):
     assert result["access_token"] == "test-token-123"
     assert result["expires_in"] == 300
     assert mock_post.called
+
+
+def _token_endpoint_answering(mocker, response: httpx.Response):
+    mocker.patch("app.services.kineis_client.settings.KINEIS_AUTH_BASE_URL", "https://account.example.com")
+    mocker.patch("app.services.kineis_client._auth_path", return_value="/token")
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mocker.patch("app.services.kineis_client.httpx.AsyncClient", return_value=mock_client)
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_rejection_quotes_the_response_body(mocker):
+    """The activity log keeps only the first line of the error: it must say what the
+    identity server answered, not just the status, or a WAF block and a Keycloak
+    refusal read the same ("Client error '403 Forbidden' for url ...")."""
+    request = httpx.Request("POST", "https://account.example.com/token")
+    body = {"error": "access_denied", "error_description": "Blocked by policy"}
+    _token_endpoint_answering(mocker, httpx.Response(403, json=body, request=request))
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        await get_access_token(username="u", password="p")
+
+    exc = excinfo.value
+    assert exc.response.status_code == 403  # is_retryable_failure and the refresh fallback read this
+    first_line = str(exc).splitlines()[0]
+    assert "403" in first_line
+    assert "Blocked by policy" in first_line
+    portal_text = format_error_message(exc)
+    assert portal_text.startswith("Authentication failed — CLS token endpoint answered 403: ")
+    assert '"access_denied"' in portal_text and "Blocked by policy" in portal_text
+    assert portal_text.endswith("(HTTP 403)")
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_rejection_body_is_one_bounded_line(mocker):
+    """An HTML block page is folded onto one line and cut short, so the portal entry
+    stays readable and the full page never lands in an event."""
+    request = httpx.Request("POST", "https://account.example.com/token")
+    page = "<html>\n  <body>\n    <h1>Access denied</h1>\n" + ("    <p>filler</p>\n" * 100) + "</body></html>"
+    _token_endpoint_answering(mocker, httpx.Response(403, text=page, request=request))
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        await get_access_token(username="u", password="p")
+
+    first_line = str(excinfo.value).splitlines()[0]
+    assert "<html> <body> <h1>Access denied</h1>" in first_line
+    assert first_line.endswith("…")
+    assert len(first_line) < 400
 
 
 @pytest.mark.asyncio
